@@ -11,5 +11,7 @@ data/docs_selected.jsonl
 logs/*.pt
 *.ptz
 logs/
+final_model.pt
+results/
 .claude/settings.local.json
 STRATEGY.md

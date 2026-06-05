@@ -306,6 +306,17 @@ INT8_KEEP_FLOAT_STORE_DTYPE = torch.float16
 INT8_PER_ROW_SCALE_DTYPE = torch.float16
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
+MATRIX_QUANT_BITS = int(os.environ.get("MATRIX_QUANT_BITS", os.environ.get("QUANT_BITS", "8")))
+EMBED_QUANT_BITS = int(os.environ.get("EMBED_QUANT_BITS", os.environ.get("EMBED_BITS", str(MATRIX_QUANT_BITS))))
+QUANT_CLIP_SEARCH = bool(int(os.environ.get("QUANT_CLIP_SEARCH", "0")))
+QUANT_CLIP_SEARCH_PCTS = tuple(
+    float(x)
+    for x in os.environ.get("QUANT_CLIP_SEARCH_PCTS", "0.999,0.9995,0.9999,0.99999,1.0").split(",")
+    if x
+)
+
+if not (2 <= MATRIX_QUANT_BITS <= 8 and 2 <= EMBED_QUANT_BITS <= 8):
+    raise ValueError("MATRIX_QUANT_BITS and EMBED_QUANT_BITS must be in [2, 8]")
 
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
@@ -318,26 +329,76 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
         return t.to(dtype=INT8_KEEP_FLOAT_STORE_DTYPE).contiguous()
     return t
 
-def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+def pack_unsigned_values(values: np.ndarray, bits: int) -> Tensor:
+    flat = np.asarray(values, dtype=np.uint8).reshape(-1)
+    if bits == 8:
+        return torch.from_numpy(flat.copy()).contiguous()
+    bit_shifts = np.arange(bits, dtype=np.uint8)
+    bit_matrix = ((flat[:, None] >> bit_shifts[None, :]) & 1).astype(np.uint8, copy=False)
+    packed = np.packbits(bit_matrix.reshape(-1), bitorder="little")
+    return torch.from_numpy(packed.copy()).contiguous()
+
+
+def unpack_unsigned_values(packed: Tensor, bits: int, numel: int) -> np.ndarray:
+    packed_np = packed.detach().cpu().numpy().astype(np.uint8, copy=False)
+    if bits == 8:
+        return packed_np[:numel].copy()
+    raw_bits = np.unpackbits(packed_np, bitorder="little")[: numel * bits].reshape(numel, bits)
+    shifts = (1 << np.arange(bits, dtype=np.uint16))
+    return (raw_bits.astype(np.uint16, copy=False) * shifts[None, :]).sum(axis=1).astype(np.uint8)
+
+
+def quant_bits_for_tensor(name: str, t: Tensor) -> int:
+    if t.ndim == 2 and name == "tok_emb.weight":
+        return EMBED_QUANT_BITS
+    return MATRIX_QUANT_BITS
+
+
+def pack_signed_quant(q: Tensor, bits: int) -> Tensor:
+    qmin = -(1 << (bits - 1))
+    if bits == 8:
+        return q.to(torch.int8).contiguous()
+    unsigned = (q.cpu().numpy().astype(np.int16, copy=False) - qmin).astype(np.uint8)
+    return pack_unsigned_values(unsigned, bits)
+
+
+def quantize_float_tensor(t: Tensor, bits: int = 8) -> tuple[Tensor, Tensor]:
     t32 = t.float()
+    qmax = (1 << (bits - 1)) - 1
+    qmin = -(1 << (bits - 1))
     if t32.ndim == 2:
         # Matrices get one scale per row, which usually tracks output-channel
         # ranges much better than a single tensor-wide scale.
-        clip_abs = (
-            torch.quantile(t32.abs(), INT8_CLIP_Q, dim=1)
-            if t32.numel()
-            else torch.empty((t32.shape[0],), dtype=torch.float32)
-        )
-        clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
-        return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+        best_q: Tensor | None = None
+        best_scale: Tensor | None = None
+        best_err = float("inf")
+        pcts = QUANT_CLIP_SEARCH_PCTS if QUANT_CLIP_SEARCH else (INT8_CLIP_Q,)
+        for pct in pcts:
+            if not t32.numel():
+                clip_abs = torch.empty((t32.shape[0],), dtype=torch.float32)
+            elif pct >= 1.0:
+                clip_abs = t32.abs().amax(dim=1)
+            else:
+                clip_abs = torch.quantile(t32.abs(), pct, dim=1)
+            clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
+            scale = (clip_abs / max(qmax, 1)).clamp_min(1.0 / max(qmax, 1))
+            q = torch.clamp(torch.round(clipped / scale[:, None]), qmin, qmax).to(torch.int16).contiguous()
+            if not QUANT_CLIP_SEARCH:
+                best_q, best_scale = q, scale
+                break
+            recon = q.float() * scale[:, None]
+            err = (t32 - recon).pow(2).mean().item()
+            if err < best_err:
+                best_q, best_scale, best_err = q, scale, err
+        if best_q is None or best_scale is None:
+            raise RuntimeError("quantization failed to select a scale")
+        return pack_signed_quant(best_q, bits), best_scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
-    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
-    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
-    return q, scale
+    scale = torch.tensor(clip_abs / max(qmax, 1) if clip_abs > 0 else 1.0, dtype=torch.float32)
+    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), qmin, qmax).to(torch.int16).contiguous()
+    return pack_signed_quant(q, bits), scale
 
 def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
     # Single supported clean-script export format:
@@ -377,9 +438,12 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             continue
 
         stats["num_float_tensors"] += 1
-        q, s = quantize_float_tensor(t)
+        bits = quant_bits_for_tensor(name, t)
+        q, s = quantize_float_tensor(t, bits=bits)
         if s.ndim > 0:
             qmeta[name] = {"scheme": "per_row", "axis": 0}
+        if bits != 8:
+            qmeta.setdefault(name, {}).update({"bits": bits, "shape": tuple(t.shape), "packed": True})
         quantized[name] = q
         scales[name] = s
         dtypes[name] = str(t.dtype).removeprefix("torch.")
@@ -405,6 +469,13 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
     for name, q in obj["quantized"].items():
         dtype = getattr(torch, obj["dtypes"][name])
         s = obj["scales"][name]
+        meta = qmeta.get(name, {})
+        bits = int(meta.get("bits", 8))
+        if meta.get("packed"):
+            shape = tuple(int(x) for x in meta["shape"])
+            unsigned = unpack_unsigned_values(q, bits, math.prod(shape))
+            qmin = -(1 << (bits - 1))
+            q = torch.from_numpy(unsigned.astype(np.int16) + qmin).reshape(shape)
         if qmeta.get(name, {}).get("scheme") == "per_row" or s.ndim > 0:
             s = s.to(dtype=torch.float32)
             # Broadcast the saved row scale back across trailing dimensions.

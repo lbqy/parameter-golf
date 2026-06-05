@@ -1,0 +1,95 @@
+{
+  "run_id": "baseline_sp1024_1xh100_1h_seed1337_torch26",
+  "log_file": "logs/baseline_sp1024_1xh100_1h_seed1337_torch26.txt",
+  "status": "completed",
+  "environment": {
+    "container": "lbqy0",
+    "workdir": "/base/project/parameter-golf",
+    "conda_env": "base",
+    "python": "/opt/conda/bin/python",
+    "torch": "2.6.0+cu126",
+    "cuda_visible_devices": "6",
+    "gpu_count_used": 1,
+    "gpu_type": "NVIDIA H100 80GB HBM3"
+  },
+  "command_overrides": {
+    "MAX_WALLCLOCK_SECONDS": 3600,
+    "RUN_ID": "baseline_sp1024_1xh100_1h_seed1337_torch26",
+    "DATA_PATH": "./data/datasets/fineweb10B_sp1024/",
+    "TOKENIZER_PATH": "./data/tokenizers/fineweb_1024_bpe.model",
+    "VOCAB_SIZE": 1024,
+    "VAL_LOSS_EVERY": 0,
+    "TRAIN_LOG_EVERY": 200,
+    "torchrun_nproc_per_node": 1
+  },
+  "data": {
+    "dataset": "fineweb10B_sp1024",
+    "train_shards": 80,
+    "val_tokens": 62021632,
+    "tokenizer_kind": "sentencepiece",
+    "tokenizer_path": "./data/tokenizers/fineweb_1024_bpe.model"
+  },
+  "model": {
+    "params": 17059912,
+    "vocab_size": 1024,
+    "num_layers": 9,
+    "model_dim": 512,
+    "num_heads": 8,
+    "num_kv_heads": 4,
+    "attention_mode": "gqa",
+    "mlp_mult": 2,
+    "tie_embeddings": true
+  },
+  "training": {
+    "seed": 1337,
+    "world_size": 1,
+    "grad_accum_steps": 8,
+    "train_batch_tokens": 524288,
+    "train_seq_len": 1024,
+    "iterations_requested": 20000,
+    "warmup_steps": 20,
+    "max_wallclock_seconds": 3600.0,
+    "stop_reason": "wallclock_cap",
+    "steps_completed": 10378,
+    "train_time_ms": 3600217,
+    "step_avg_ms": 346.91,
+    "tokens_seen": 5441054464,
+    "last_logged_train_loss": {
+      "step": 10200,
+      "train_loss": 2.1510
+    }
+  },
+  "optimizer": {
+    "embed_lr": 0.05,
+    "head_lr": 0.0,
+    "matrix_lr": 0.04,
+    "scalar_lr": 0.04
+  },
+  "pre_quant_eval": {
+    "step": 10378,
+    "val_loss": 2.0684,
+    "val_bpb": 1.2250
+  },
+  "artifact": {
+    "raw_model_bytes": 67224578,
+    "code_bytes": 47686,
+    "raw_total_submission_bytes": 67272264,
+    "int8_zlib_model_bytes": 15821617,
+    "int8_payload_bytes": 17178912,
+    "int8_raw_torch_bytes": 17223564,
+    "int8_payload_ratio": 3.91,
+    "int8_zlib_total_submission_bytes": 15869303,
+    "submission_limit_bytes": 16000000,
+    "bytes_under_limit": 130697
+  },
+  "final_roundtrip_eval": {
+    "val_loss": 2.08024568,
+    "val_bpb": 1.23203866,
+    "eval_time_ms": 11269
+  },
+  "notes": [
+    "This baseline was run on a single idle H100 selected with CUDA_VISIBLE_DEVICES=6.",
+    "The gf environment used torch 2.12.0+cu130 but hit a torch.compile/Inductor backward shape error at default full batch, so this successful run used the container base environment with torch 2.6.0+cu126.",
+    "The base environment was missing sentencepiece initially; sentencepiece was installed before this run."
+  ]
+}
