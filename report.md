@@ -1,6 +1,6 @@
 # Parameter Golf 1xH100/1h Milestone Report
 
-日期：2026-06-07
+日期：2026-06-08
 
 ## 摘要
 
@@ -123,6 +123,23 @@
 
 第四阶段没有证明 records 技术无效，只证明“把少数组件单独移植到 Q43 静态训练栈上”收益很小。SmearGate、SparseGate、LeakyReLU^2、Polar NS 这类组件在 records 中大概率不是孤立增益源，而是与 CaseOps/doc boundary、TTT、parallel residual/lane、压缩布局共同 co-adapt。当前做法缺少这些配套机制，因此只能得到局部小收益或被量化损失吞掉。
 
+### CaseOps 数据链路补充
+
+2026-06-08 已补上阶段四最关键的数据前置工作：容器 `b5e2809a5863` / `lbqy0` 内的 canonical raw docs 已下载完成，路径为 `/base/datasets/CaseOps/raw/docs_selected.jsonl`，大小约 44GB；`docs_selected.source_manifest.json` 和 `manifest.json` 也已就位。详细交接记录见 `experiments/caseops_handoff.md`。
+
+目前完成的 smoke：
+
+| 检查项 | 结果 | 说明 |
+| --- | --- | --- |
+| raw docs 读取 | 通过 | 首行是 JSON object，含 `text` 字段 |
+| CaseOps tokenizer | 可用 | records 内 `fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model` 可加载，vocab=8192 |
+| 小样本 prepare | 通过 | 前 64 篇 doc 生成 train/val/val_bytes shard |
+| byte sidecar 对齐 | 通过 | val token shard 与 `fineweb_val_bytes_000000.bin` 长度一致 |
+| BOS sidecar | 通过 | 16 个验证 doc 的 BOS byte 全为 0 |
+| 根脚本 loader | 通过 | 极小模型 1 step + int8 roundtrip 可读取 CaseOps token shard |
+
+这个补充改变了阶段四的问题定位：CaseOps 已不再是“缺 raw docs 无法开始”，而是“raw docs 和 prepare smoke 可用，但完整 token shards 尚未生成，根脚本尚未按 `fineweb_val_bytes_*.bin` 计算原始 byte BPB”。当前 `train_gpt.py` smoke 日志仍是 `val_bpb:enabled tokenizer_kind=sentencepiece`，还没有出现 `val_bpb:byte_sidecar:enabled`。因此，CaseOps 还不能进入完整 1h 训练基线；下一步必须先完成 full prepare 和 byte-sidecar BPB 接入。
+
 ## 当前最优组合的解释
 
 当前最佳 QS28 是 Q43 训练栈上继续叠加 SparseGate + LeakyReLU^2 + Polar NS 后，再做一轮窄幅导出细扫得到的结果。它可以理解为四个层次的配合：
@@ -138,7 +155,7 @@
 
 当前结果是根脚本内的强局部最优，但距离 records 级 SOTA 仍有约 0.10414 BPB 差距。这个 gap 太大，不可能靠 Q43/QS28 周围继续扫 `top_k`、`rank`、`calib`、`error_scale` 或单个小结构开关关闭。更本质的问题是：我们仍在优化一个“普通 token-stream 静态模型”，而 records 级方案很可能已经把数据表示、推理时自适应、结构栈和压缩布局一起改了。
 
-1. 数据链路缺陷是第一层硬伤。当前仍是普通 SP8192 token stream，缺 CaseOps、byte sidecar、doc boundary 和 BOS sidecar 合规评估。records 路线不是单纯让同一个 token 分布训练得更好，而是降低待预测序列的有效熵，并把 byte 级信息放进合规 sidecar 中。这个收益通常是架构和超参补不回来的。
+1. 数据链路缺陷仍是第一层硬伤，但状态已经从“缺 raw docs”推进到“raw docs 和小样本 prepare smoke 可用”。当前仍缺完整 CaseOps shards、根脚本 byte-sidecar BPB、doc boundary eval/TTT 接入。records 路线不是单纯让同一个 token 分布训练得更好，而是降低待预测序列的有效熵，并把 byte 级信息放进合规 sidecar 中。这个收益通常是架构和超参补不回来的。
 2. TTT 还没有真正实现。第三阶段失败的 `ttt_eval.py` 只是 lm-head LoRA、全局连续 token block 更新，不能代表 records 中的 legal/phased TTT。真正可能有收益的版本需要 doc-boundary、score-before-update、单 pass 无 rescoring、multi-phase global SGD、Q/K/V/O/MLP/head adapters、per-doc reset 或 warm-start，并且 forward path 必须镜像训练/导出模型。我们现在缺的是完整机制，不是差一个 LoRA rank。
 3. 结构栈是零散移植，不是共同设计。QS28 只接入了 SparseGate + LeakyReLU^2 + Polar NS；缺 parallel residual / decoder lane、XSA、11L/MLP4x、QuantGate/SmearGate 的正确组合、doc-safe gate 路由等 records 常见组件。单项 ablation 负收益不意外，因为这些组件可能依赖数据链路、TTT 和压缩容量共同适配。
 4. 压缩链路仍在“保质量”，没有“创造容量”。GPTQ/LQER/brotli 已经能把当前模型压进 16 MB，但没有 per-group layout、simsort、lrzip、权重重排、按层 bit allocation 或面向 gate/lane/adapters 的专门编码。没有新的压缩余量，就很难同时放入 embed7/更大结构/adapter/LQER 修正并维持 roundtrip。
@@ -149,9 +166,9 @@
 
 ## 下一步建议
 
-短期不建议继续在 QS28 周围做大量 top-k、rank、calibration、error-scale 微扫，因为导出侧已经出现平台期。若目标是逼近 SOTA，下一阶段需要停止以单开关 ablation 为主线，改成三条高杠杆路径：
+短期不建议继续在 QS28 周围做大量 top-k、rank、calibration、error-scale 微扫，因为导出侧已经出现平台期。若目标是逼近 SOTA，第五阶段需要停止以单开关 ablation 为主线，改成三条高杠杆路径：
 
-1. CaseOps/data sidecar 可行性：先恢复 raw doc stream 和 byte sidecar，验证 `val_bpb:byte_sidecar:enabled`、BOS sidecar 和 doc boundary 合规，再做短训 smoke。
+1. CaseOps/data sidecar 合规链路：raw docs 已恢复，下一步是完整生成 CaseOps train/val/val_bytes shards，修改 `train_gpt.py` 读取 `fineweb_val_bytes_*.bin`，验证 `val_bpb:byte_sidecar:enabled`、BOS sidecar 和 doc boundary 合规，再做短训 smoke。
 2. 真正的 legal/phased TTT：不要沿用 lm-head MVP，改为按 records 设计 adapter 位置、phase、score-before-update、单 pass、无 rescoring、per-doc reset/warm-start 和更新预算；先 eval-only 接到 Q43/QS28 artifact 上，看是否至少有 `-0.002 BPB`。
 3. 结构/压缩联合设计：parallel residual / decoder lane、11L/MLP4x、XSA、gate 类结构必须和 per-group compression、simsort/lrzip、专门 bit allocation 一起设计，避免 pre BPB 改善继续被 roundtrip 吃掉。
 

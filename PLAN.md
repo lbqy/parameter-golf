@@ -435,3 +435,90 @@ RECURRENCE_ACTIVE=1
 - 若启用 CaseOps：tokenizer 路径、dataset 路径、byte sidecar 路径、`val_bpb:byte_sidecar:enabled` 日志；
 - 若启用 TTT：pre-TTT、post-TTT、TTT gain、eval_time、prefix docs、phase 数、adapter 位置、rank/lr/wd、score-before-update 合规说明；
 - 结论必须明确写为：继续叠加、需要 retune、或淘汰。
+
+---
+
+## 第五阶段：CaseOps 合规链路与 SOTA 主线重启（规划）
+
+### 阶段四收口
+
+第四阶段实际完成了两类工作：
+
+| 方向 | 当前状态 | 结论 |
+| --- | --- | --- |
+| 静态结构局部移植 | `SparseGate + LeakyReLU^2 + Polar NS` 经 QS28 导出达到 `1.16522320` | 比 Q43 改善约 `0.00213 BPB`，但远不足以缩小 SOTA gap |
+| CaseOps 数据恢复 | 容器 `b5e2809a5863` 内 raw docs 已下载，`/tmp/caseops_smoke` 小样本 prepare/sidecar/root-loader smoke 通过 | S4-C0 从“缺数据”推进到“raw docs 与 prepare smoke 可用”，但完整 shards 与 byte-sidecar BPB 仍未完成 |
+
+因此第四阶段的真实结论是：**Q43/QS28 附近继续做单开关或导出微扫已经进入平台期；第五阶段必须把主线转向 CaseOps 合规 BPB、doc-boundary TTT、结构/压缩联合设计。**
+
+### 当前锚点
+
+| 项目 | 值 |
+| --- | --- |
+| 本地最佳 | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` |
+| Roundtrip BPB | **1.16522320** |
+| 总字节 | **15,755,553** |
+| Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export`：`1.16735413` |
+| records 参考 | `2026-04-27...1.0611`，3-seed mean 约 `1.06108` |
+| CaseOps raw docs | `/base/datasets/CaseOps/raw/docs_selected.jsonl`，约 44GB |
+| CaseOps smoke 记录 | `experiments/caseops_handoff.md` |
+
+### 第五阶段核心原则
+
+1. 不再把 `QS28 + export-only` 作为主要优化面。除非为新结构释放容量，否则不继续大量扫 `LQER_TOP_K`、`LQER_RANK`、`GPTQ_ERROR_SCALE`、`GPTQ_CALIBRATION_BATCHES`。
+2. CaseOps 必须先合规再训练。没有 `val_bpb:byte_sidecar:enabled`、BOS sidecar byte=0、token/byte 长度对齐之前，不启动完整 1h CaseOps 实验。
+3. TTT 必须依赖 doc boundary。不能复用第三阶段 lm-head LoRA MVP 作为判断依据；第五阶段只接受 score-before-update、single pass、no rescoring 的 doc-level TTT。
+4. 结构改动必须和压缩容量一起设计。parallel lane、11L/MLP4x、gate、adapter 不能只看 pre BPB，必须从一开始检查 artifact bytes 和 roundtrip。
+5. 内核优化服务于更复杂路线。固定 seq 训练继续使用 torch SDPA flash；FA3/varlen/fused CE/fused MLP 只有在 CaseOps/doc-boundary/TTT 或更复杂结构成为吞吐瓶颈时作为支撑线。
+
+### 第五阶段成功标准
+
+| 优先级 | 标准 |
+| --- | --- |
+| P0 | 完整 CaseOps dataset 生成完成，含 `fineweb_train_*.bin`、`fineweb_val_*.bin`、`fineweb_val_bytes_*.bin` |
+| P1 | 根脚本 eval 日志出现 `val_bpb:byte_sidecar:enabled`，BOS sidecar byte=0，token/byte sidecar 长度一致 |
+| P2 | CaseOps Q43/QS28 结构短训 smoke 可完成 train/eval/GPTQ roundtrip，BPB 分母使用原始 bytes |
+| P3 | CaseOps 1h baseline roundtrip 优于普通 SP8192 Q43，或明确证明当前 CaseOps 接入存在可修问题 |
+| P4 | 真 phased TTT eval-only 在同一 artifact 上至少 `-0.002 BPB`，且满足 score-before-update、single pass、doc boundary、no rescoring |
+| P5 | 阶段五组合候选目标：roundtrip BPB <= `1.155`；若 TTT 可用，post-TTT 目标 <= `1.150` |
+
+### 实验矩阵
+
+| ID | 目的 | 基座 | 关键工作 | 通过 / 淘汰标准 |
+| --- | --- | --- | --- | --- |
+| S5-C0 | 完整 CaseOps 生成 | raw docs + records tokenizer | 运行 `prepare_caseops_data.py`，生成 full train/val/val_bytes shards | shard header 正常，val token/byte 长度一致，BOS byte=0 |
+| S5-C1 | byte-sidecar BPB 接入 | 根目录 `train_gpt.py` | eval 加载 `fineweb_val_bytes_*.bin`，按 y token 对齐 sidecar byte count | smoke 日志出现 `val_bpb:byte_sidecar:enabled`；普通 SP8192 路径不退化 |
+| S5-C2 | CaseOps loader/eval smoke | `/tmp/caseops_smoke` 与 full CaseOps | 极小模型 1-2 step + roundtrip，验证 tokenizer/sidecar/eval | train/eval/export 均跑通，BPB 使用 sidecar |
+| S5-C3 | CaseOps 短训 | Q43 recipe 缩短版 | 10-15min train + GPTQ/LQER | pre/roundtrip 不异常，step_avg 可接受 |
+| S5-C4 | CaseOps 1h baseline | Q43 recipe | 1xH100 1h，先不叠新 TTT/parallel lane | roundtrip 优于 Q43；若负收益，先排查 byte 对齐和 tokenizer |
+| S5-C5 | CaseOps + QS28 结构 | SparseGate + LeakyReLU^2 + Polar NS | 在 CaseOps 上复测阶段四唯一正组合 | 必须优于 S5-C4 或显示可量化 pre 收益 |
+| S5-T0 | doc boundary 切分 smoke | CaseOps val tokens | 从 BOS 构造 docs/prefix phase，记录每 token score 次数 | 每个 token 只 score 一次，phase update 只使用已 score docs |
+| S5-T1 | true legal TTT MVP | Q43/QS28 artifact，优先 CaseOps eval | Q/K/V/O + MLP + head adapters，score-before-update | post-TTT 至少 `-0.002 BPB`，无 rescoring |
+| S5-T2 | phased TTT sweep | S5-T1 正信号 | rank/lr/wd/phase/prefix docs/warm-start A | 收益稳定且 eval time 可接受 |
+| S5-P0 | 容量 guard | 当前 GPTQ/LQER artifact | 估算 lane/11L/MLP4x/gate/adapters 字节预算 | 明确需要 Z 线释放多少容量 |
+| S5-Z0 | per-group/simsort/lrzip smoke | QS28 artifact | export-only 验证权重重排与压缩恢复一致 | 至少释放 150-250KB，roundtrip 不变 |
+| S5-P1 | parallel residual/lane MVP | CaseOps baseline 或 QS28 | 后段 lane + learned mix，小心控制参数量 | roundtrip 优于对应基座，step 损失可接受 |
+| S5-P2 | 11L/MLP4x 受控移植 | S5-P1 或 CaseOps baseline | 先 11L/MLP2，再 9L/MLP3/4，最后组合 | artifact <=16MB，pre 收益能保到 roundtrip |
+| S5-K0 | kernel microbench | S5-C/T/P 触发时 | FA3/varlen、fused CE、fused LeakyReLU^2 MLP | 吞吐改善或支撑 TTT/doc-boundary，BPB 不退化 |
+
+### 首批执行顺序
+
+1. **S5-C0：完整 CaseOps prepare**。在容器 `b5e2809a5863` 内从 `/base/datasets/CaseOps/raw/docs_selected.jsonl` 生成 full shards。该步骤可 CPU 长跑，完成后记录 shard 数、总 token 数、val byte sum。
+2. **S5-C1/C2：byte-sidecar BPB 接入与 smoke**。先用 `/tmp/caseops_smoke` 做 1 step 验证，再切 full CaseOps val。目标日志必须包含 `val_bpb:byte_sidecar:enabled`。
+3. **S5-C3/C4：CaseOps 短训与 1h baseline**。只用 Q43 recipe，不叠 TTT/parallel lane，先量化 CaseOps 本身收益。
+4. **S5-T0/T1：doc-boundary TTT eval-only**。CaseOps 合规 eval 后再做 TTT；若 TTT 不产生至少 `-0.002 BPB`，先修合规/adapter path，不急着跑组合训练。
+5. **S5-Z0/P0：压缩容量审计**。若 CaseOps+TTT 有正信号，再为 lane/11L/MLP4x/adapters 释放容量。
+6. **S5-C5/P1/P2 组合实验**。组合顺序优先 `CaseOps + TTT`，再叠 `SparseGate + LeakyReLU^2 + Polar NS`，最后叠 parallel lane/11L/MLP4x。
+
+### 记录格式
+
+第五阶段每个实验新增 `experiments/exp_s5_<id>.md`，至少记录：
+
+- 数据路径：`DATA_PATH`、`TOKENIZER_PATH`、`fineweb_val_bytes_*.bin` pattern；
+- CaseOps 合规项：sidecar header、token/byte 长度、BOS count、BOS byte=0、byte sum；
+- 完整 env 命令和代码 diff 摘要；
+- step 数、step_avg、peak memory、train/eval/export time；
+- pre BPB、roundtrip BPB、若启用 TTT 则记录 pre-TTT/post-TTT；
+- artifact bytes、total bytes、GPTQ/LQER/per-group/lrzip 配置；
+- TTT 合规项：doc 数、phase 数、prefix docs、adapter 位置、rank/lr/wd、score-before-update、single pass、no rescoring；
+- 结论必须写明：继续叠加、修实现、降优先级、或淘汰。
