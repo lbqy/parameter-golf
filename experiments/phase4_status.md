@@ -119,12 +119,12 @@ RECURRENCE_ACTIVE=1
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
-| S4-G2 | `exp_s4_g2_smear_w12_q43_1xh100` | 0 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=12` | running | | | | |
-| S4-G2W24 | `exp_s4_g2_smear_w24_q43_1xh100` | 3 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=24` | running | | | | |
-| S4-G2G1 | `exp_s4_g2g1_smear_w12_leaky_q43_1xh100` | 4 | Smear w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | running | | | | |
-| S4-G2K3 | `exp_s4_g2k3_smear_w12_polarns_q43_1xh100` | 5 | Smear w12 + `MUON_NS_MODE=polar` | running | | | | |
-| S4-G2G1K3 | `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100` | 6 | Smear w12 + LeakyReLU^2 + Polar NS | running | | | | |
-| S4-G2G1W24 | `exp_s4_g2g1_smear_w24_leaky_q43_1xh100` | 7 | Smear w24 + `MLP_LEAKY_RELU_SLOPE=0.5` | running | | | | |
+| S4-G2 | `exp_s4_g2_smear_w12_q43_1xh100` | 0 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=12` | completed | 1.1718 | 1.17765970 | 15,707,917 | 明显负收益；w12 单项淘汰 |
+| S4-G2W24 | `exp_s4_g2_smear_w24_q43_1xh100` | 3 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=24` | completed | 1.1716 | 1.17381431 | 15,702,778 | 负于 Q43；w24 好于 w12 但仍不保留 |
+| S4-G2G1 | `exp_s4_g2g1_smear_w12_leaky_q43_1xh100` | 4 | Smear w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | completed | 1.1688 | 1.17693348 | 15,749,234 | pre 尚可但量化后崩坏；不继续 |
+| S4-G2K3 | `exp_s4_g2k3_smear_w12_polarns_q43_1xh100` | 5 | Smear w12 + `MUON_NS_MODE=polar` | completed | 1.1718 | 1.17370056 | 15,728,282 | 负于 Q43；不继续 |
+| S4-G2G1K3 | `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100` | 6 | Smear w12 + LeakyReLU^2 + Polar NS | completed | 1.1697 | 1.17692282 | 15,760,223 | 组合负收益；不继续 |
+| S4-G2G1W24 | `exp_s4_g2g1_smear_w24_leaky_q43_1xh100` | 7 | Smear w24 + `MLP_LEAKY_RELU_SLOPE=0.5` | completed | 1.1696 | 1.17304535 | 15,736,074 | SmearGate 批次最佳但仍明显负于 Q43 |
 
 启动检查：6 个 SmearGate 实验已完成 `warmup_step:20/20` 并进入训练循环；早期 `step_avg` 约 720-731ms，GPU 0/3/4/5/6/7 约 95-100% 利用率。
 
@@ -145,6 +145,8 @@ RECURRENCE_ACTIVE=1
 - `exp_s4_g2k3_smear_w12_polarns_q43_1xh100`：step_avg 711.89ms。
 - `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100`：step_avg 712.93ms。
 - `exp_s4_g2g1_smear_w24_leaky_q43_1xh100`：step_avg 716.54ms。
+
+结论：SmearGate 当前实现和组合全部负于 Q43；w24 明显好于 w12，但最好 roundtrip 仍只有 `1.17304535`。这更像是“单独把 smear 接进 Q43 不成立”，不能推翻 records 中带 CaseOps/doc-boundary/TTT/结构栈的 SmearGate 组合收益；后续不再单独扫 SmearGate，除非先恢复 CaseOps 或正版 phased TTT。
 
 ## 首批结论
 
