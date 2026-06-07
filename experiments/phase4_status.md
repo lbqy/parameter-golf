@@ -213,6 +213,8 @@ RECURRENCE_ACTIVE=1
 
 Rerun 中段检查：step 1600，step_avg 716.42ms，GPU3 约 100% 利用率；训练轨迹与原 `S4-G3G1K3` 接近，checkpoint/artifact 将保存在 run 目录内。
 
+Rerun 收尾前检查：step 3800，step_avg 717.16ms，GPU3 约 100% 利用率；train loss 轨迹仍贴近原 `S4-G3G1K3`。
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
