@@ -116,6 +116,19 @@ RECURRENCE_ACTIVE=1
 - `ROTARY_DIM=16` 在单项和组合中都偏负，暂不进入下一轮完整训练。
 - `MUON_NS_MODE=polar` 单项速度较快，step 数 5091，高于其他组；但 roundtrip 未优于 Q43，后续只作为与 LeakyReLU^2 或新结构组合的候选。
 
+## G1K3 export-only 量化细扫
+
+基座 checkpoint：`results/experiments/exp_s4_g1k3_leaky_polarns_q43_1xh100/final_model.pt`。
+
+| ID | RUN_ID | GPU | 改动 | 状态 | Roundtrip BPB | 总字节 | 结论 |
+| --- | --- | ---: | --- | --- | ---: | ---: | --- |
+| S4-QG1 | `exp_s4_qg1_g1k3_top4_rank4_calib32_export` | 0 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=32` | running | | | |
+| S4-QG2 | `exp_s4_qg2_g1k3_top4_rank8_calib32_export` | 3 | `LQER_TOP_K=4 LQER_RANK=8 GPTQ_CALIBRATION_BATCHES=32` | running | | | |
+| S4-QG3 | `exp_s4_qg3_g1k3_top5_rank4_calib32_export` | 4 | `LQER_TOP_K=5 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=32` | running | | | |
+| S4-QG4 | `exp_s4_qg4_g1k3_top4_rank4_calib64_export` | 5 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=64` | running | | | |
+| S4-QG5 | `exp_s4_qg5_g1k3_top4_rank4_err075_export` | 6 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_ERROR_SCALE=0.75` | running | | | |
+| S4-QG6 | `exp_s4_qg6_g1k3_top4_rank4_err125_export` | 7 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_ERROR_SCALE=1.25` | running | | | |
+
 ## 记录要求
 
 每个实验完成后记录：
