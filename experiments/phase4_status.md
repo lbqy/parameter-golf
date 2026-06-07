@@ -195,13 +195,21 @@ RECURRENCE_ACTIVE=1
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | --- |
-| S4-QS1 | `exp_s4_qs1_g3g1k3_err050_export` | 3 | `GPTQ_ERROR_SCALE=0.50` | running | | | |
-| S4-QS2 | `exp_s4_qs2_g3g1k3_err060_export` | 4 | `GPTQ_ERROR_SCALE=0.60` | running | | | |
-| S4-QS3 | `exp_s4_qs3_g3g1k3_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | running | | | |
-| S4-QS4 | `exp_s4_qs4_g3g1k3_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | running | | | |
-| S4-QS5 | `exp_s4_qs5_g3g1k3_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | running | | | |
+| S4-QS1 | `exp_s4_qs1_g3g1k3_err050_export` | 3 | `GPTQ_ERROR_SCALE=0.50` | failed-start | | | broken checkpoint symlink；未产生结果 |
+| S4-QS2 | `exp_s4_qs2_g3g1k3_err060_export` | 4 | `GPTQ_ERROR_SCALE=0.60` | failed-start | | | broken checkpoint symlink；未产生结果 |
+| S4-QS3 | `exp_s4_qs3_g3g1k3_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | failed-start | | | broken checkpoint symlink；未产生结果 |
+| S4-QS4 | `exp_s4_qs4_g3g1k3_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | failed-start | | | broken checkpoint symlink；未产生结果 |
+| S4-QS5 | `exp_s4_qs5_g3g1k3_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | failed-start | | | broken checkpoint symlink；未产生结果 |
 
 启动说明：GPU0 被非本批进程占用约 57GB，先在 GPU 3-7 启动 5 个 error-scale export-only；GPU0 释放后再补 `err070 + rank8` 或 `err070 + calib32`。
+
+失败复盘：完整 SparseGate 批次是在项目根目录并行启动，`train_gpt.py` 将 `final_model.pt` 写到当前工作目录，导致 6 个完整 run 的 checkpoint 互相覆盖；结果目录中没有各自的真实 `final_model.pt`。根目录残留 checkpoint 不能可靠归属到 `S4-G3G1K3`，因此不应继续用它做量化细扫。
+
+修复动作：启动 checkpoint-safe rerun `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100`，在 run 目录内执行训练，确保 `final_model.pt`、`final_model.gptq.ptz` 和日志都保存在该目录下；该 rerun 若复现新最佳，再基于它重启 `S4-QS*` export-only。
+
+| ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
+| S4-G3G1K3R | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100` | 3 | Sparse w12 + LeakyReLU^2 + Polar NS，run-dir cwd | running | | | | checkpoint-safe rerun |
 
 ## 首批结论
 
