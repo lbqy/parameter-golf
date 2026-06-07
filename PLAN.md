@@ -313,3 +313,125 @@ baseline roundtrip BPB = 1.17661956, total bytes = 15,738,799
 - GPTQ/LQER 配置、artifact bytes、total bytes；
 - `final_gptq+brotli_roundtrip_exact val_bpb`；
 - 若启用 TTT，另记 pre-TTT、post-TTT、eval_time、score-before-update 合规说明。
+
+---
+
+## 第四阶段：面向 SOTA 差距的深度优化实验（规划）
+
+### 阶段三复盘与不要误判的负结果
+
+第三阶段已经把根目录脚本推进到一个清晰的局部最优：
+
+| 项目 | 值 |
+| --- | --- |
+| 当前最佳 | `exp_s3_q43_r15_clip_top4_rank4_export` |
+| Roundtrip BPB | **1.16735413** |
+| 总字节 | **15,753,494** |
+| 训练 checkpoint | `exp_s3_r15_b3_qkgain5_hparam_tied004_muon097_recur_l3_5_start030_1xh100/final_model.pt` |
+
+对照 records 中 `2026-04-27_SP8192_LQER_SparseGate_BOSSmearFix_9HpStack_1.0611` 的 3-seed mean **1.06108**，当前差距已经不是 Q43 周围继续微扫 `LQER_TOP_K`、`GPTQ_ERROR_SCALE` 或 `RECURRENCE_START_FRAC` 能解决的。第三阶段负结果应这样理解：
+
+- `coprime loader` 和 `warmdown/min-lr` 在当前根脚本中负收益，不代表 records 对应思想在 CaseOps/doc-boundary/TTT 栈里无效。
+- `lm-head LoRA TTT MVP` 负收益，只证明当前简化实现不可用，不能淘汰 records 中普遍有效的 phased/legal TTT。
+- 递归已经有正收益，但 L3-L5、start 0.30 附近出现平台期；继续单独扫 start frac 的收益很低。
+- R15/Q43 的量化细扫基本收敛；下一阶段要把重点转向数据链路、TTT、结构组件和压缩余量。
+
+### 为什么 TTT 没做好
+
+当前 `ttt_eval.py` 与 records 中有效 TTT 的差距很大：
+
+| 维度 | 当前 MVP | records 中有效方案 |
+| --- | --- | --- |
+| Adapter 位置 | 只在 lm head 上加 LoRA | Q/K/V/O、MLP、lm head 多处 adapter |
+| 更新单位 | 固定连续 token block | document boundary / prefix docs |
+| 调度 | 单阶段边 score 边更新 | multi-phase global SGD，score-first 后再更新 |
+| 状态策略 | 一个全局 adapter 连续更新 | per-doc reset、warm-start A、phase 累积更新 |
+| 合规性验证 | token block score-before-update | doc-level score-before-update、single pass、no rescoring |
+| forward 镜像 | 只复用 hidden + head | TTT forward 必须镜像门控、递归、parallel residual、SmearGate |
+
+因此 S3-T1 的失败结论应写成：**lm-head-only TTT 替代品不可用**。第四阶段仍应把真正的 phased/legal TTT 作为高优先级主线，目标不是“再调当前脚本几个 TTT LR”，而是重做 doc-boundary TTT 路径。
+
+### records 共性拆解
+
+| 差距方向 | records 共性 | 当前根脚本状态 | 第四阶段判断 |
+| --- | --- | --- | --- |
+| 数据/tokenizer | CaseOps SP8192 + validation byte sidecar + BOS boundary | 普通 SP8192，BPB 来自 tokenizer LUT | 最高优先级，先打通数据和合规 BPB |
+| TTT | phased TTT、multi-phase global SGD、doc-level score-first | lm-head LoRA MVP | 最高优先级，需重做而非微调 |
+| Attention kernel | FA3 / varlen attention 支撑 doc-boundary 和 TTT | torch SDPA flash backend 已启用，固定 seq | 固定 seq 足够；做 doc/varlen/TTT 时再引入 FA3 |
+| RoPE | partial RoPE、YaRN/LN scale 常见；可试 FoPE 变体 | full RoPE | 中优先级，先小矩阵短训 |
+| MLP activation | LeakyReLU(0.5)^2 + fused MLP 常见 | ReLU^2，MLP_MULT=2 | 高优先级低风险，先只换 activation |
+| 结构 | 11L、MLP4x、XSA、parallel decoder lane、depth recurrence | 9L、MLP2x、U-Net skip、轻量 recurrence | 分阶段移植，避免一次性增参/降速 |
+| Gate | Sparse attention gate、SmearGate BOS-fix、QuantGate | 未实现 | 高优先级，单独验证 |
+| 优化器/内核 | Polar-Express NS、fused softcapped CE、fused MLP | 标准 Muon NS、eager CE/MLP | 作为吞吐/质量支撑线 |
+| 压缩 | per-group、similarity-sort、lrzip | brotli + packed GPTQ/LQER | 用于释放容量，而不是单独追 BPB |
+
+### 第四阶段成功标准
+
+| 优先级 | 标准 |
+| --- | --- |
+| P0 | 所有最终候选 artifact 总字节 <= 16,000,000 |
+| P1 | 任何完整 1h 训练候选必须报告 pre-quant、roundtrip、step 数、step_avg |
+| P2 | 单项结构/训练改动 roundtrip BPB 优于 Q43 或带来可证明的容量/吞吐余量 |
+| P3 | 第四阶段短期目标：roundtrip BPB <= 1.160 |
+| P4 | 若启用 TTT，post-TTT 至少比同 artifact pre-TTT 改善 0.002 BPB，且满足 score-before-update、single pass、doc boundary、no rescoring |
+
+### 第四阶段实验矩阵
+
+每个实验仍以 `final_gptq+brotli_roundtrip_exact` 或明确的 post-TTT BPB 为准。除非特别说明，训练基线使用 Q43 winning recipe：
+
+```text
+SP8192, TRAIN_SEQ_LEN=4096, 1xH100, MAX_WALLCLOCK_SECONDS=3600
+QK_GAIN_INIT=5.0, BETA2=0.99, GRAD_CLIP_NORM=0.3
+MLP_CLIP_SIGMAS=12, EMBED_CLIP_SIGMAS=15
+TIED_EMBED_LR=0.04, MUON_MOMENTUM=0.97
+RECURRENCE_EXTRA_PASSES=1, RECURRENCE_START_LAYER=3, RECURRENCE_END_LAYER=5
+RECURRENCE_START_FRAC=0.30
+QUANT_MODE=gptq, COMPRESSOR=brotli, FRESH_MODEL_AFTER_QUANT=1
+GPTQ_SCALE_MODE=quantile, GPTQ_SCALE_FLOOR=1, GPTQ_ERROR_SCALE=1
+MATRIX_BITS=6, EMBED_BITS=8, GPTQ_CALIBRATION_BATCHES=16
+LQER_ENABLED=1, LQER_RANK=4, LQER_TOP_K=4, LQER_ASYM_ENABLED=1
+RECURRENCE_ACTIVE=1
+```
+
+| ID | 目的 | 改动 | 代码需求 | 运行方式 | 通过标准 |
+| --- | --- | --- | --- | --- | --- |
+| S4-C0 | CaseOps 数据链路可行性 | 下载/恢复 CaseOps tokenizer、train shards、`fineweb_val_bytes_*.bin` | 小到中 | 数据 smoke + eval smoke | 日志出现 `val_bpb:byte_sidecar:enabled`，BOS sidecar byte=0，token/byte 对齐 |
+| S4-C1 | CaseOps 短训 | plain root/Q43 结构切到 CaseOps SP8192 | 中 | 10-15min smoke train + GPTQ | pre BPB 不异常，roundtrip 合规，确认可进入 1h |
+| S4-C2 | CaseOps 完整基线 | Q43 recipe + CaseOps | 中 | 1h train + GPTQ/LQER | roundtrip 优于 Q43，若 TTT 未启用也记录 pre/post quant |
+| S4-T0 | TTT 合规数据切分 | 从 val tokens 找 BOS doc boundary，构造 prefix phase 切分 | 中 | artifact eval-only smoke | 每个 token 只 score 一次，phase 更新只用已 score docs |
+| S4-T1 | 真 phased TTT MVP | LoRA on Q/K/V/O + MLP + head，3 phase global SGD | 高 | Q43 artifact eval-only | post-TTT 比 Q43 artifact pre-TTT 至少 -0.002 BPB |
+| S4-T2 | TTT 参数扫 | rank 32/64/80，alpha、weight decay、warm-start A、prefix docs 1500/2500 | 高 | T1 正信号后 eval-only | 找到稳定收益且 eval time 可控 |
+| S4-G1 | LeakyReLU^2 | `ReLU(x)^2` 改为 `LeakyReLU(x, 0.5)^2`，MLP_MULT 保持 2 | 小 | 完整 1h train + GPTQ | roundtrip 优于 Q43 或 pre 明显改善且量化损失不增 |
+| S4-G2 | SmearGate BOS-safe | position-mixing gate，当前 token 为 BOS 时屏蔽前 token smear | 中 | 完整 1h train + GPTQ | pre/roundtrip 改善，无跨 doc 泄露 |
+| S4-G3 | Sparse attention output gate | per-head narrow gate，`gate_window=12`，gate int8/float16 量化路径 | 中 | 完整 1h train + GPTQ | roundtrip 改善，artifact 仍 <=16MB |
+| S4-RoPE1 | Partial RoPE | 只对 head_dim 前 16/64 dims 做 RoPE，剩余 dims no-RoPE | 小 | 短训后 1h | 短训 pre 改善约 0.001 后再完整跑 |
+| S4-RoPE2 | FoPE 小矩阵 | `pure RoPE -> nomix+floor0.25 -> mix+zero -> mix+nozero` | 中 | 10-15min 短训筛选 | 只有优于 partial RoPE 时进入完整 1h |
+| S4-P1 | Parallel decoder lane | 后段 decoder lane + learned lane mix，先不改层数 | 中高 | 完整 1h train + GPTQ | step 下降可接受，roundtrip 优于 Q43 |
+| S4-P2 | 11L/MLP4x 受控移植 | 先 11L+MLP2，再 9L+MLP3/4，最后组合 | 高 | 0-step size guard + 短训 + 1h | artifact 容量可控，吞吐不抵消质量收益 |
+| S4-K1 | FA3/varlen attention | 保留 torch SDPA flash 作为默认；doc/TTT 路径启用 FA3/varlen | 高 | kernel smoke + TTT eval | 固定 seq 不退化，doc-boundary eval/TTT 更快或可运行 |
+| S4-K2 | fused CE / fused MLP | fused softcapped CE；若 G1 正收益则 fused LeakyReLU^2 MLP | 高 | microbench + 1h train | step time 改善或持平，BPB 不退化 |
+| S4-K3 | Polar-Express NS | 5-step per-iteration minimax NS tuple 替换固定 Muon tuple | 小 | 完整 1h train + GPTQ | 与 `MUON_MOMENTUM=0.97` 叠加后 roundtrip 改善 |
+| S4-Z1 | per-group compression | hot tensor 分组、similarity-sort、lrzip ZPAQ，其余 brotli | 中高 | export-only | 至少释放 200KB，roundtrip 权重一致 |
+| S4-Z2 | 容量再分配 | 用 Z1 容量试 embed7/8、gate int8、LQER top/rank、MLP/11L | 中 | export-only + 1h train | 证明新增容量换来 BPB，而不是只变小 |
+
+### 首批执行顺序
+
+1. **S4-C0/C1：CaseOps 数据链路 smoke**。先恢复 tokenizer、dataset、byte sidecar 和 BOS 边界；没有 byte sidecar 之前不进入完整 1h。
+2. **S4-T0/T1：正版 phased TTT eval-only**。先在 Q43 artifact 上验证 doc-level score-before-update TTT 是否有至少 `-0.002 BPB`，避免继续调 lm-head MVP。
+3. **S4-G1/G2/G3：LeakyReLU^2、SmearGate、SparseGate 单项完整训练**。先单独验证，不和 parallel lane/11L 同时叠加。
+4. **S4-K1/K2：内核支撑**。固定 seq 训练继续用 torch SDPA flash；只有当 TTT/doc-boundary 或 MLP/CE 成为瓶颈时引入 FA3/varlen/fused kernel。
+5. **S4-Z1：压缩余量**。若 gate、11L、MLP4x、TTT adapter 元数据导致容量紧张，再做 per-group/lrzip；否则不把压缩当作独立 BPB 主线。
+6. **组合实验**。只组合已经单项为正的组件，优先顺序为 `CaseOps + TTT`，再叠 `LeakyReLU^2 + SparseGate/SmearGate`，最后考虑 `parallel lane / 11L / MLP4x`。
+
+### 记录格式
+
+每个第四阶段实验新增 `experiments/exp_s4_<id>.md`，至少记录：
+
+- 基座：Q43/R15、CaseOps 或新结构 checkpoint；
+- 完整 env 命令、代码 diff 摘要、是否启用 FA3/fused kernel；
+- step 数、step_avg、peak memory、train time；
+- pre-quant BPB、roundtrip BPB、artifact bytes、total bytes；
+- GPTQ/LQER/压缩配置，是否使用 per-group/lrzip；
+- 若启用 CaseOps：tokenizer 路径、dataset 路径、byte sidecar 路径、`val_bpb:byte_sidecar:enabled` 日志；
+- 若启用 TTT：pre-TTT、post-TTT、TTT gain、eval_time、prefix docs、phase 数、adapter 位置、rank/lr/wd、score-before-update 合规说明；
+- 结论必须明确写为：继续叠加、需要 retune、或淘汰。

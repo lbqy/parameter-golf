@@ -70,6 +70,8 @@ class Hyperparameters:
     mlp_mult = int(os.environ.get("MLP_MULT", 2))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
+    rotary_dim = int(os.environ.get("ROTARY_DIM", 0))
+    mlp_leaky_relu_slope = float(os.environ.get("MLP_LEAKY_RELU_SLOPE", 0.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
 
     # Optimizer hyperparameters.
@@ -81,6 +83,7 @@ class Hyperparameters:
     scalar_lr = float(os.environ.get("SCALAR_LR", 0.04))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
+    muon_ns_mode = os.environ.get("MUON_NS_MODE", "stock").lower()
     muon_momentum_warmup_start = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
     muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     beta1 = float(os.environ.get("BETA1", 0.9))
@@ -137,6 +140,29 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -
     if transposed:
         X = X.T
     for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    return X.T if transposed else X
+
+
+PE_NS_COEFFS = (
+    (8.156554524902461, -22.48329292557795, 15.878769915207462),
+    (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+    (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+    (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+    (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
+)
+
+
+def zeropower_via_polar_express(G: Tensor, steps: int = 10, eps: float = 1e-7) -> Tensor:
+    X = G.bfloat16()
+    X /= X.norm() + eps
+    transposed = G.size(0) > G.size(1)
+    if transposed:
+        X = X.T
+    coeffs = PE_NS_COEFFS[:steps] if steps <= len(PE_NS_COEFFS) else PE_NS_COEFFS
+    for a, b, c in coeffs:
         A = X @ X.T
         B = b * A + c * A @ A
         X = a * X + B @ X
@@ -744,6 +770,13 @@ def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return torch.cat((x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos), dim=-1)
 
 
+def apply_partial_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor, rotary_dim: int) -> Tensor:
+    if rotary_dim == x.size(-1):
+        return apply_rotary_emb(x, cos, sin)
+    x_rot = apply_rotary_emb(x[..., :rotary_dim], cos, sin)
+    return torch.cat((x_rot, x[..., rotary_dim:]), dim=-1)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(
         self,
@@ -752,6 +785,7 @@ class CausalSelfAttention(nn.Module):
         num_kv_heads: int,
         rope_base: float,
         qk_gain_init: float,
+        rotary_dim: int,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -763,6 +797,9 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = dim // num_heads
         if self.head_dim % 2 != 0:
             raise ValueError("head_dim must be even for RoPE")
+        self.rotary_dim = self.head_dim if rotary_dim <= 0 else rotary_dim
+        if self.rotary_dim <= 0 or self.rotary_dim > self.head_dim or self.rotary_dim % 2 != 0:
+            raise ValueError(f"ROTARY_DIM must be an even value in [2, {self.head_dim}], got {rotary_dim}")
         kv_dim = self.num_kv_heads * self.head_dim
         self.c_q = CastedLinear(dim, dim, bias=False)
         self.c_k = CastedLinear(dim, kv_dim, bias=False)
@@ -770,7 +807,7 @@ class CausalSelfAttention(nn.Module):
         self.proj = CastedLinear(dim, dim, bias=False)
         self.proj._zero_init = True
         self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
-        self.rotary = Rotary(self.head_dim, base=rope_base)
+        self.rotary = Rotary(self.rotary_dim, base=rope_base)
 
     def forward(self, x: Tensor) -> Tensor:
         bsz, seqlen, dim = x.shape
@@ -780,8 +817,8 @@ class CausalSelfAttention(nn.Module):
         q = F.rms_norm(q, (q.size(-1),))
         k = F.rms_norm(k, (k.size(-1),))
         cos, sin = self.rotary(seqlen, x.device, q.dtype)
-        q = apply_rotary_emb(q, cos, sin)
-        k = apply_rotary_emb(k, cos, sin)
+        q = apply_partial_rotary_emb(q, cos, sin, self.rotary_dim)
+        k = apply_partial_rotary_emb(k, cos, sin, self.rotary_dim)
         q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
         y = F.scaled_dot_product_attention(
             q,
@@ -796,16 +833,18 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    # relu^2 MLP from the original modded-nanogpt setup
-    def __init__(self, dim: int, mlp_mult: int):
+    # relu^2 MLP from the original modded-nanogpt setup; optional leaky variant for S4.
+    def __init__(self, dim: int, mlp_mult: int, leaky_relu_slope: float):
         super().__init__()
         hidden = mlp_mult * dim
         self.fc = CastedLinear(dim, hidden, bias=False)
         self.proj = CastedLinear(hidden, dim, bias=False)
         self.proj._zero_init = True
+        self.leaky_relu_slope = leaky_relu_slope
 
     def forward(self, x: Tensor) -> Tensor:
-        x = torch.relu(self.fc(x))
+        x = self.fc(x)
+        x = F.leaky_relu(x, negative_slope=self.leaky_relu_slope) if self.leaky_relu_slope > 0.0 else torch.relu(x)
         return self.proj(x.square())
 
 
@@ -818,12 +857,14 @@ class Block(nn.Module):
         mlp_mult: int,
         rope_base: float,
         qk_gain_init: float,
+        rotary_dim: int,
+        mlp_leaky_relu_slope: float,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
-        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
-        self.mlp = MLP(dim, mlp_mult)
+        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init, rotary_dim)
+        self.mlp = MLP(dim, mlp_mult, mlp_leaky_relu_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
@@ -851,6 +892,8 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        rotary_dim: int = 0,
+        mlp_leaky_relu_slope: float = 0.0,
         recurrence_extra_passes: int = 0,
         recurrence_start_layer: int = 3,
         recurrence_end_layer: int = 5,
@@ -862,6 +905,8 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.rotary_dim = rotary_dim
+        self.mlp_leaky_relu_slope = mlp_leaky_relu_slope
         self.recurrence_extra_passes = recurrence_extra_passes
         self.recurrence_start_layer = recurrence_start_layer
         self.recurrence_end_layer = recurrence_end_layer
@@ -880,6 +925,8 @@ class GPT(nn.Module):
                     mlp_mult,
                     rope_base,
                     qk_gain_init,
+                    rotary_dim,
+                    mlp_leaky_relu_slope,
                 )
                 for i in range(num_layers)
             ]
@@ -940,6 +987,10 @@ def main() -> None:
 
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
+    if args.muon_ns_mode == "polar":
+        zeropower_via_newtonschulz5 = zeropower_via_polar_express
+    elif args.muon_ns_mode != "stock":
+        raise ValueError(f"Unknown MUON_NS_MODE={args.muon_ns_mode!r}; expected 'stock' or 'polar'")
     zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
 
     # -----------------------------
@@ -1046,6 +1097,8 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
+        rotary_dim=args.rotary_dim,
+        mlp_leaky_relu_slope=args.mlp_leaky_relu_slope,
         recurrence_extra_passes=args.recurrence_extra_passes,
         recurrence_start_layer=args.recurrence_start_layer,
         recurrence_end_layer=args.recurrence_end_layer,
@@ -1112,6 +1165,10 @@ def main() -> None:
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
     log0("sdp_backends:cudnn=False flash=True mem_efficient=False math=False")
     log0(f"attention_mode:gqa num_heads:{args.num_heads} num_kv_heads:{args.num_kv_heads}")
+    log0(
+        f"s4_arch:rotary_dim:{args.rotary_dim if args.rotary_dim > 0 else 'full'} "
+        f"mlp_leaky_relu_slope:{args.mlp_leaky_relu_slope} muon_ns_mode:{args.muon_ns_mode}"
+    )
     log0(
         f"recurrence_extra_passes:{args.recurrence_extra_passes} "
         f"recurrence_layers:{args.recurrence_start_layer}-{args.recurrence_end_layer} "
@@ -1452,6 +1509,8 @@ def main() -> None:
             logit_softcap=args.logit_softcap,
             rope_base=args.rope_base,
             qk_gain_init=args.qk_gain_init,
+            rotary_dim=args.rotary_dim,
+            mlp_leaky_relu_slope=args.mlp_leaky_relu_slope,
             recurrence_extra_passes=args.recurrence_extra_passes,
             recurrence_start_layer=args.recurrence_start_layer,
             recurrence_end_layer=args.recurrence_end_layer,
