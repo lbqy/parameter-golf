@@ -119,12 +119,14 @@ RECURRENCE_ACTIVE=1
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
-| S4-G2 | `exp_s4_g2_smear_w12_q43_1xh100` | 0 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=12` | queued | | | | |
-| S4-G2W24 | `exp_s4_g2_smear_w24_q43_1xh100` | 3 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=24` | queued | | | | |
-| S4-G2G1 | `exp_s4_g2g1_smear_w12_leaky_q43_1xh100` | 4 | Smear w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | queued | | | | |
-| S4-G2K3 | `exp_s4_g2k3_smear_w12_polarns_q43_1xh100` | 5 | Smear w12 + `MUON_NS_MODE=polar` | queued | | | | |
-| S4-G2G1K3 | `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100` | 6 | Smear w12 + LeakyReLU^2 + Polar NS | queued | | | | |
-| S4-G2G1W24 | `exp_s4_g2g1_smear_w24_leaky_q43_1xh100` | 7 | Smear w24 + `MLP_LEAKY_RELU_SLOPE=0.5` | queued | | | | |
+| S4-G2 | `exp_s4_g2_smear_w12_q43_1xh100` | 0 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=12` | running | | | | |
+| S4-G2W24 | `exp_s4_g2_smear_w24_q43_1xh100` | 3 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=24` | running | | | | |
+| S4-G2G1 | `exp_s4_g2g1_smear_w12_leaky_q43_1xh100` | 4 | Smear w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | running | | | | |
+| S4-G2K3 | `exp_s4_g2k3_smear_w12_polarns_q43_1xh100` | 5 | Smear w12 + `MUON_NS_MODE=polar` | running | | | | |
+| S4-G2G1K3 | `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100` | 6 | Smear w12 + LeakyReLU^2 + Polar NS | running | | | | |
+| S4-G2G1W24 | `exp_s4_g2g1_smear_w24_leaky_q43_1xh100` | 7 | Smear w24 + `MLP_LEAKY_RELU_SLOPE=0.5` | running | | | | |
+
+启动检查：6 个 SmearGate 实验已完成 `warmup_step:20/20` 并进入训练循环；早期 `step_avg` 约 720-731ms，GPU 0/3/4/5/6/7 约 95-100% 利用率。
 
 ## 首批结论
 
