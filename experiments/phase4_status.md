@@ -8,9 +8,10 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 本地最佳 | `exp_s3_q43_r15_clip_top4_rank4_export` |
-| Roundtrip BPB | `1.16735413` |
-| 总字节 | `15,753,494` |
+| 本地最佳 | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` |
+| Roundtrip BPB | `1.16622225` |
+| 总字节 | `15,756,176` |
+| Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export`：roundtrip `1.16735413`，总字节 `15,753,494` |
 | 默认训练栈 | Q43/R15 recipe：SP8192 seq4096, QK5, beta2=0.99, grad clip 0.3, tied embed lr 0.04, Muon momentum 0.97, L3-L5 recurrence start 0.30 |
 | 默认导出栈 | GPTQ int6/embed8 + brotli + LQER rank4 top4, `FRESH_MODEL_AFTER_QUANT=1`, `RECURRENCE_ACTIVE=1` |
 
@@ -159,12 +160,12 @@ RECURRENCE_ACTIVE=1
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
-| S4-G3 | `exp_s4_g3_sparse_w12_q43_1xh100` | 0 | `SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_WINDOW=12` | running | | | | |
-| S4-G3S05 | `exp_s4_g3_sparse_w12_scale05_q43_1xh100` | 3 | Sparse w12 + `SPARSE_ATTN_GATE_SCALE=0.5` | running | | | | |
-| S4-G3W24 | `exp_s4_g3_sparse_w24_q43_1xh100` | 4 | Sparse w24 | running | | | | |
-| S4-G3G1 | `exp_s4_g3g1_sparse_w12_leaky_q43_1xh100` | 5 | Sparse w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | running | | | | |
-| S4-G3K3 | `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100` | 6 | Sparse w12 + `MUON_NS_MODE=polar` | running | | | | |
-| S4-G3G1K3 | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` | 7 | Sparse w12 + LeakyReLU^2 + Polar NS | running | | | | |
+| S4-G3 | `exp_s4_g3_sparse_w12_q43_1xh100` | 0 | `SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_WINDOW=12` | completed | 1.1672 | 1.16893548 | 15,708,668 | 负于 Q43；单项 w12 不保留 |
+| S4-G3S05 | `exp_s4_g3_sparse_w12_scale05_q43_1xh100` | 3 | Sparse w12 + `SPARSE_ATTN_GATE_SCALE=0.5` | completed | 1.1675 | 1.16935059 | 15,720,945 | 负于 scale1；不继续 |
+| S4-G3W24 | `exp_s4_g3_sparse_w24_q43_1xh100` | 4 | Sparse w24 | completed | 1.1662 | 1.16879370 | 15,725,113 | pre 改善但量化未保住；不继续单项 |
+| S4-G3G1 | `exp_s4_g3g1_sparse_w12_leaky_q43_1xh100` | 5 | Sparse w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | completed | 1.1657 | 1.16828884 | 15,744,327 | pre 强但 roundtrip 仍负于 Q43 |
+| S4-G3K3 | `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100` | 6 | Sparse w12 + `MUON_NS_MODE=polar` | completed | 1.1659 | 1.16774440 | 15,704,811 | 接近 Q43 但未超过；保留参考 |
+| S4-G3G1K3 | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` | 7 | Sparse w12 + LeakyReLU^2 + Polar NS | completed | 1.1633 | **1.16622225** | 15,756,176 | 新本地最佳；进入 export-only 量化细扫 |
 
 启动检查：6 个 SparseGate 实验已完成 `warmup_step:20/20` 并进入训练循环；早期 `step_avg` 约 721-730ms，GPU 0/3/4/5/6/7 已被训练进程占用。
 
@@ -185,6 +186,8 @@ RECURRENCE_ACTIVE=1
 - `exp_s4_g3g1_sparse_w12_leaky_q43_1xh100`：step 3800，step_avg 719.58ms。
 - `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100`：step 3800，step_avg 715.40ms。
 - `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100`：step 3800，step_avg 719.14ms。
+
+结论：SparseGate 单项仍负于 Q43，但与 LeakyReLU^2 + Polar NS 叠加后首次打破 Q43：`S4-G3G1K3` roundtrip `1.16622225`，相对 Q43 `1.16735413` 改善约 `-0.00113 BPB`。该路线的 pre BPB `1.1633` 明显强于 Q43，但量化损失仍较大，下一步优先对 `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100/final_model.pt` 做 export-only GPTQ/LQER 细扫，而不是继续扩大 gate 搜索。
 
 ## 首批结论
 
