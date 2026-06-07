@@ -72,6 +72,9 @@ class Hyperparameters:
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     rotary_dim = int(os.environ.get("ROTARY_DIM", 0))
     mlp_leaky_relu_slope = float(os.environ.get("MLP_LEAKY_RELU_SLOPE", 0.0))
+    smear_gate_enabled = bool(int(os.environ.get("SMEAR_GATE_ENABLED", "0")))
+    smear_gate_width = int(os.environ.get("SMEAR_GATE_WIDTH", 12))
+    bos_id = int(os.environ.get("BOS_ID", 1))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
 
     # Optimizer hyperparameters.
@@ -349,7 +352,7 @@ CONTROL_TENSOR_NAME_PATTERNS = tuple(
     pattern
     for pattern in os.environ.get(
         "CONTROL_TENSOR_NAME_PATTERNS",
-        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights",
+        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,smear_gate,smear_lambda",
     ).split(",")
     if pattern
 )
@@ -894,6 +897,9 @@ class GPT(nn.Module):
         qk_gain_init: float,
         rotary_dim: int = 0,
         mlp_leaky_relu_slope: float = 0.0,
+        smear_gate_enabled: bool = False,
+        smear_gate_width: int = 12,
+        bos_id: int = 1,
         recurrence_extra_passes: int = 0,
         recurrence_start_layer: int = 3,
         recurrence_end_layer: int = 5,
@@ -907,11 +913,20 @@ class GPT(nn.Module):
         self.logit_softcap = logit_softcap
         self.rotary_dim = rotary_dim
         self.mlp_leaky_relu_slope = mlp_leaky_relu_slope
+        self.smear_gate_enabled = smear_gate_enabled
+        self.smear_gate_width = smear_gate_width
+        self.bos_id = bos_id
         self.recurrence_extra_passes = recurrence_extra_passes
         self.recurrence_start_layer = recurrence_start_layer
         self.recurrence_end_layer = recurrence_end_layer
         self.recurrence_active = recurrence_active
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
+        if self.smear_gate_enabled:
+            if self.smear_gate_width <= 0 or self.smear_gate_width > model_dim:
+                raise ValueError(f"SMEAR_GATE_WIDTH must be in [1, {model_dim}], got {self.smear_gate_width}")
+            self.smear_gate = CastedLinear(self.smear_gate_width, 1, bias=False)
+            self.smear_gate._zero_init = True
+            self.smear_lambda = nn.Parameter(torch.zeros(1, dtype=torch.float32))
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
@@ -937,6 +952,15 @@ class GPT(nn.Module):
             self.lm_head._zero_init = True
         self._init_weights()
 
+    def _apply_smear_gate(self, x: Tensor, input_ids: Tensor) -> Tensor:
+        if not self.smear_gate_enabled:
+            return x
+        sl = self.smear_lambda.to(dtype=x.dtype)
+        gate_in = x[:, 1:, : self.smear_gate_width].contiguous()
+        g = sl * torch.sigmoid(self.smear_gate(gate_in))
+        not_bos = (input_ids[:, 1:] != self.bos_id).to(dtype=x.dtype).unsqueeze(-1)
+        return torch.cat((x[:, :1], x[:, 1:] + g * x[:, :-1] * not_bos), dim=1)
+
     def _init_weights(self) -> None:
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
@@ -947,6 +971,7 @@ class GPT(nn.Module):
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
+        x = self._apply_smear_gate(x, input_ids)
         x0 = x
         skips: list[Tensor] = []
 
@@ -1099,6 +1124,9 @@ def main() -> None:
         qk_gain_init=args.qk_gain_init,
         rotary_dim=args.rotary_dim,
         mlp_leaky_relu_slope=args.mlp_leaky_relu_slope,
+        smear_gate_enabled=args.smear_gate_enabled,
+        smear_gate_width=args.smear_gate_width,
+        bos_id=args.bos_id,
         recurrence_extra_passes=args.recurrence_extra_passes,
         recurrence_start_layer=args.recurrence_start_layer,
         recurrence_end_layer=args.recurrence_end_layer,
@@ -1129,6 +1157,9 @@ def main() -> None:
     ]
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
+    if getattr(base_model, "smear_gate_enabled", False):
+        scalar_params.append(base_model.smear_gate.weight)
+        scalar_params.append(base_model.smear_lambda)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
@@ -1167,7 +1198,8 @@ def main() -> None:
     log0(f"attention_mode:gqa num_heads:{args.num_heads} num_kv_heads:{args.num_kv_heads}")
     log0(
         f"s4_arch:rotary_dim:{args.rotary_dim if args.rotary_dim > 0 else 'full'} "
-        f"mlp_leaky_relu_slope:{args.mlp_leaky_relu_slope} muon_ns_mode:{args.muon_ns_mode}"
+        f"mlp_leaky_relu_slope:{args.mlp_leaky_relu_slope} muon_ns_mode:{args.muon_ns_mode} "
+        f"smear_gate_enabled:{args.smear_gate_enabled} smear_gate_width:{args.smear_gate_width}"
     )
     log0(
         f"recurrence_extra_passes:{args.recurrence_extra_passes} "
@@ -1511,6 +1543,9 @@ def main() -> None:
             qk_gain_init=args.qk_gain_init,
             rotary_dim=args.rotary_dim,
             mlp_leaky_relu_slope=args.mlp_leaky_relu_slope,
+            smear_gate_enabled=args.smear_gate_enabled,
+            smear_gate_width=args.smear_gate_width,
+            bos_id=args.bos_id,
             recurrence_extra_passes=args.recurrence_extra_passes,
             recurrence_start_layer=args.recurrence_start_layer,
             recurrence_end_layer=args.recurrence_end_layer,

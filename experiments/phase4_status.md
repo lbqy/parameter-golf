@@ -108,6 +108,24 @@ RECURRENCE_ACTIVE=1
 
 当前容器只发现 `/base/datasets/SP8192`，未发现现成 CaseOps dataset、`fineweb_val_bytes_*.bin` 或 `docs_selected.jsonl`。S4-C0 需要先恢复数据链路；在 byte sidecar 可用前，不启动 S4-C1/C2 完整训练。
 
+## SmearGate 实现状态
+
+- 已在根目录 `train_gpt.py` 增加默认关闭的 `SMEAR_GATE_ENABLED` / `SMEAR_GATE_WIDTH` / `BOS_ID` 开关。
+- SmearGate 放在 token embedding + RMSNorm 后、Transformer blocks 前；当前 token 为 BOS 时屏蔽前 token smear，避免跨文档泄露。
+- `smear_gate` 和 `smear_lambda` 已纳入控制 tensor / scalar Adam 路径；默认零初始化，关闭时不影响 Q43 复现。
+- `smoke_s4_smear_1step` 已通过 train/export/roundtrip 路径。
+
+## SmearGate 完整训练批次
+
+| ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
+| S4-G2 | `exp_s4_g2_smear_w12_q43_1xh100` | 0 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=12` | queued | | | | |
+| S4-G2W24 | `exp_s4_g2_smear_w24_q43_1xh100` | 3 | `SMEAR_GATE_ENABLED=1 SMEAR_GATE_WIDTH=24` | queued | | | | |
+| S4-G2G1 | `exp_s4_g2g1_smear_w12_leaky_q43_1xh100` | 4 | Smear w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | queued | | | | |
+| S4-G2K3 | `exp_s4_g2k3_smear_w12_polarns_q43_1xh100` | 5 | Smear w12 + `MUON_NS_MODE=polar` | queued | | | | |
+| S4-G2G1K3 | `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100` | 6 | Smear w12 + LeakyReLU^2 + Polar NS | queued | | | | |
+| S4-G2G1W24 | `exp_s4_g2g1_smear_w24_leaky_q43_1xh100` | 7 | Smear w24 + `MLP_LEAKY_RELU_SLOPE=0.5` | queued | | | | |
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
