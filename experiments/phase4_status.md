@@ -135,12 +135,14 @@ RECURRENCE_ACTIVE=1
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | --- |
-| S4-QG7 | `exp_s4_qg7_g1k3_top4_rank4_err050_export` | 0 | `GPTQ_ERROR_SCALE=0.50` | running | | | |
-| S4-QG8 | `exp_s4_qg8_g1k3_top4_rank4_err060_export` | 3 | `GPTQ_ERROR_SCALE=0.60` | running | | | |
-| S4-QG9 | `exp_s4_qg9_g1k3_top4_rank4_err070_export` | 4 | `GPTQ_ERROR_SCALE=0.70` | running | | | |
-| S4-QG10 | `exp_s4_qg10_g1k3_top4_rank4_err085_export` | 5 | `GPTQ_ERROR_SCALE=0.85` | running | | | |
-| S4-QG11 | `exp_s4_qg11_g1k3_top4_rank8_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75 LQER_RANK=8` | running | | | |
-| S4-QG12 | `exp_s4_qg12_g1k3_top4_rank4_err075_calib32_export` | 7 | `GPTQ_ERROR_SCALE=0.75 GPTQ_CALIBRATION_BATCHES=32` | running | | | |
+| S4-QG7 | `exp_s4_qg7_g1k3_top4_rank4_err050_export` | 0 | `GPTQ_ERROR_SCALE=0.50` | completed | 1.16881739 | 15,763,291 | error too low，负于 QG9 |
+| S4-QG8 | `exp_s4_qg8_g1k3_top4_rank4_err060_export` | 3 | `GPTQ_ERROR_SCALE=0.60` | completed | 1.16830020 | 15,762,650 | 负于 QG9 |
+| S4-QG9 | `exp_s4_qg9_g1k3_top4_rank4_err070_export` | 4 | `GPTQ_ERROR_SCALE=0.70` | completed | **1.16809560** | 15,763,250 | G1K3 export-only 当前最佳，但仍负于 Q43 |
+| S4-QG10 | `exp_s4_qg10_g1k3_top4_rank4_err085_export` | 5 | `GPTQ_ERROR_SCALE=0.85` | completed | 1.16836381 | 15,763,651 | 负于 QG9 |
+| S4-QG11 | `exp_s4_qg11_g1k3_top4_rank8_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75 LQER_RANK=8` | completed | 1.16810487 | 15,768,973 | 与 QG9 持平但更大 |
+| S4-QG12 | `exp_s4_qg12_g1k3_top4_rank4_err075_calib32_export` | 7 | `GPTQ_ERROR_SCALE=0.75 GPTQ_CALIBRATION_BATCHES=32` | completed | 1.16832362 | 15,763,159 | calib32 无收益 |
+
+结论：G1K3 的最佳 export-only 为 `GPTQ_ERROR_SCALE=0.70`，roundtrip `1.16809560`，仍未超过 Q43 `1.16735413`。该路线保留为“pre-quant 强但量化不够鲁棒”的参考，不再继续做细粒度 error_scale 微扫。
 
 ## 记录要求
 
