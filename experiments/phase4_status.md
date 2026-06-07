@@ -53,6 +53,16 @@
 - `exp_s4_g1rope16_leaky_rotary16_q43_1xh100`：step_avg 721.45ms。
 - `exp_s4_k3rope16_polarns_rotary16_q43_1xh100`：step_avg 720.53ms。
 
+收尾前检查：
+
+- 约 52 分钟时，6 个实验均到 step 4400，GPU 0/3/4/5/6/7 仍约 100% 利用率。
+- `exp_s4_g1_leakyrelu2_q43_1xh100`：step_avg 719.08ms。
+- `exp_s4_rope1_rotary16_q43_1xh100`：step_avg 716.55ms。
+- `exp_s4_k3_polarns_q43_1xh100`：step_avg 707.43ms。
+- `exp_s4_g1k3_leaky_polarns_q43_1xh100`：step_avg 714.72ms。
+- `exp_s4_g1rope16_leaky_rotary16_q43_1xh100`：step_avg 721.12ms。
+- `exp_s4_k3rope16_polarns_rotary16_q43_1xh100`：step_avg 720.24ms。
+
 ### 公共命令环境
 
 ```bash
