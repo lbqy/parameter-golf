@@ -74,6 +74,9 @@ class Hyperparameters:
     mlp_leaky_relu_slope = float(os.environ.get("MLP_LEAKY_RELU_SLOPE", 0.0))
     smear_gate_enabled = bool(int(os.environ.get("SMEAR_GATE_ENABLED", "0")))
     smear_gate_width = int(os.environ.get("SMEAR_GATE_WIDTH", 12))
+    sparse_attn_gate_enabled = bool(int(os.environ.get("SPARSE_ATTN_GATE_ENABLED", "0")))
+    sparse_attn_gate_window = int(os.environ.get("SPARSE_ATTN_GATE_WINDOW", os.environ.get("GATE_WINDOW", 12)))
+    sparse_attn_gate_scale = float(os.environ.get("SPARSE_ATTN_GATE_SCALE", 1.0))
     bos_id = int(os.environ.get("BOS_ID", 1))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
 
@@ -352,7 +355,7 @@ CONTROL_TENSOR_NAME_PATTERNS = tuple(
     pattern
     for pattern in os.environ.get(
         "CONTROL_TENSOR_NAME_PATTERNS",
-        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,smear_gate,smear_lambda",
+        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,attn_gate_w,smear_gate,smear_lambda",
     ).split(",")
     if pattern
 )
@@ -789,6 +792,9 @@ class CausalSelfAttention(nn.Module):
         rope_base: float,
         qk_gain_init: float,
         rotary_dim: int,
+        sparse_attn_gate_enabled: bool,
+        sparse_attn_gate_window: int,
+        sparse_attn_gate_scale: float,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -811,6 +817,15 @@ class CausalSelfAttention(nn.Module):
         self.proj._zero_init = True
         self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
         self.rotary = Rotary(self.rotary_dim, base=rope_base)
+        self.sparse_attn_gate_enabled = sparse_attn_gate_enabled
+        self.sparse_attn_gate_window = sparse_attn_gate_window
+        self.sparse_attn_gate_scale = sparse_attn_gate_scale
+        if self.sparse_attn_gate_enabled:
+            if self.sparse_attn_gate_window <= 0 or self.sparse_attn_gate_window > dim:
+                raise ValueError(
+                    f"SPARSE_ATTN_GATE_WINDOW must be in [1, {dim}], got {self.sparse_attn_gate_window}"
+                )
+            self.attn_gate_w = nn.Parameter(torch.zeros(num_heads, self.sparse_attn_gate_window, dtype=torch.float32))
 
     def forward(self, x: Tensor) -> Tensor:
         bsz, seqlen, dim = x.shape
@@ -831,6 +846,12 @@ class CausalSelfAttention(nn.Module):
             is_causal=True,
             enable_gqa=(self.num_kv_heads != self.num_heads),
         )
+        if self.sparse_attn_gate_enabled:
+            gate_in = x[..., : self.sparse_attn_gate_window].contiguous()
+            scale = self.attn_gate_w.new_full((), self.sparse_attn_gate_scale).to(dtype=x.dtype)
+            gate = torch.sigmoid(scale * F.linear(gate_in, self.attn_gate_w.to(x.dtype)))
+            gate = gate + gate
+            y = y * gate.transpose(1, 2).unsqueeze(-1)
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -862,11 +883,24 @@ class Block(nn.Module):
         qk_gain_init: float,
         rotary_dim: int,
         mlp_leaky_relu_slope: float,
+        sparse_attn_gate_enabled: bool,
+        sparse_attn_gate_window: int,
+        sparse_attn_gate_scale: float,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
-        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init, rotary_dim)
+        self.attn = CausalSelfAttention(
+            dim,
+            num_heads,
+            num_kv_heads,
+            rope_base,
+            qk_gain_init,
+            rotary_dim,
+            sparse_attn_gate_enabled,
+            sparse_attn_gate_window,
+            sparse_attn_gate_scale,
+        )
         self.mlp = MLP(dim, mlp_mult, mlp_leaky_relu_slope)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -899,6 +933,9 @@ class GPT(nn.Module):
         mlp_leaky_relu_slope: float = 0.0,
         smear_gate_enabled: bool = False,
         smear_gate_width: int = 12,
+        sparse_attn_gate_enabled: bool = False,
+        sparse_attn_gate_window: int = 12,
+        sparse_attn_gate_scale: float = 1.0,
         bos_id: int = 1,
         recurrence_extra_passes: int = 0,
         recurrence_start_layer: int = 3,
@@ -915,6 +952,9 @@ class GPT(nn.Module):
         self.mlp_leaky_relu_slope = mlp_leaky_relu_slope
         self.smear_gate_enabled = smear_gate_enabled
         self.smear_gate_width = smear_gate_width
+        self.sparse_attn_gate_enabled = sparse_attn_gate_enabled
+        self.sparse_attn_gate_window = sparse_attn_gate_window
+        self.sparse_attn_gate_scale = sparse_attn_gate_scale
         self.bos_id = bos_id
         self.recurrence_extra_passes = recurrence_extra_passes
         self.recurrence_start_layer = recurrence_start_layer
@@ -942,6 +982,9 @@ class GPT(nn.Module):
                     qk_gain_init,
                     rotary_dim,
                     mlp_leaky_relu_slope,
+                    sparse_attn_gate_enabled,
+                    sparse_attn_gate_window,
+                    sparse_attn_gate_scale,
                 )
                 for i in range(num_layers)
             ]
@@ -1126,6 +1169,9 @@ def main() -> None:
         mlp_leaky_relu_slope=args.mlp_leaky_relu_slope,
         smear_gate_enabled=args.smear_gate_enabled,
         smear_gate_width=args.smear_gate_width,
+        sparse_attn_gate_enabled=args.sparse_attn_gate_enabled,
+        sparse_attn_gate_window=args.sparse_attn_gate_window,
+        sparse_attn_gate_scale=args.sparse_attn_gate_scale,
         bos_id=args.bos_id,
         recurrence_extra_passes=args.recurrence_extra_passes,
         recurrence_start_layer=args.recurrence_start_layer,
@@ -1199,7 +1245,10 @@ def main() -> None:
     log0(
         f"s4_arch:rotary_dim:{args.rotary_dim if args.rotary_dim > 0 else 'full'} "
         f"mlp_leaky_relu_slope:{args.mlp_leaky_relu_slope} muon_ns_mode:{args.muon_ns_mode} "
-        f"smear_gate_enabled:{args.smear_gate_enabled} smear_gate_width:{args.smear_gate_width}"
+        f"smear_gate_enabled:{args.smear_gate_enabled} smear_gate_width:{args.smear_gate_width} "
+        f"sparse_attn_gate_enabled:{args.sparse_attn_gate_enabled} "
+        f"sparse_attn_gate_window:{args.sparse_attn_gate_window} "
+        f"sparse_attn_gate_scale:{args.sparse_attn_gate_scale}"
     )
     log0(
         f"recurrence_extra_passes:{args.recurrence_extra_passes} "
@@ -1545,6 +1594,9 @@ def main() -> None:
             mlp_leaky_relu_slope=args.mlp_leaky_relu_slope,
             smear_gate_enabled=args.smear_gate_enabled,
             smear_gate_width=args.smear_gate_width,
+            sparse_attn_gate_enabled=args.sparse_attn_gate_enabled,
+            sparse_attn_gate_window=args.sparse_attn_gate_window,
+            sparse_attn_gate_scale=args.sparse_attn_gate_scale,
             bos_id=args.bos_id,
             recurrence_extra_passes=args.recurrence_extra_passes,
             recurrence_start_layer=args.recurrence_start_layer,

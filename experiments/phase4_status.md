@@ -148,6 +148,24 @@ RECURRENCE_ACTIVE=1
 
 结论：SmearGate 当前实现和组合全部负于 Q43；w24 明显好于 w12，但最好 roundtrip 仍只有 `1.17304535`。这更像是“单独把 smear 接进 Q43 不成立”，不能推翻 records 中带 CaseOps/doc-boundary/TTT/结构栈的 SmearGate 组合收益；后续不再单独扫 SmearGate，除非先恢复 CaseOps 或正版 phased TTT。
 
+## SparseGate 实现状态
+
+- 已在根目录 `train_gpt.py` 增加默认关闭的 `SPARSE_ATTN_GATE_ENABLED` / `SPARSE_ATTN_GATE_WINDOW` / `SPARSE_ATTN_GATE_SCALE` 开关。
+- SparseGate 放在 SDPA 输出后、attention out projection 前；输入为 residual 的前 `SPARSE_ATTN_GATE_WINDOW` 维，输出为 per-head 乘法 gate。
+- 公式保持 records 的透明初始化语义：`attn_gate_w=0` 时 `2 * sigmoid(0) = 1`；`attn_gate_w` 纳入控制 tensor 路径，默认关闭时不影响 Q43。
+- `smoke_s4_sparsegate_2step_v3` 已通过 train/eval/GPTQ/fresh roundtrip 路径；`final_gptq+brotli_roundtrip_exact val_bpb=5.25308490` 仅作功能 smoke，不作质量比较。
+
+## SparseGate 完整训练批次
+
+| ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
+| --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
+| S4-G3 | `exp_s4_g3_sparse_w12_q43_1xh100` | 0 | `SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_WINDOW=12` | planned | | | | |
+| S4-G3S05 | `exp_s4_g3_sparse_w12_scale05_q43_1xh100` | 3 | Sparse w12 + `SPARSE_ATTN_GATE_SCALE=0.5` | planned | | | | |
+| S4-G3W24 | `exp_s4_g3_sparse_w24_q43_1xh100` | 4 | Sparse w24 | planned | | | | |
+| S4-G3G1 | `exp_s4_g3g1_sparse_w12_leaky_q43_1xh100` | 5 | Sparse w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | planned | | | | |
+| S4-G3K3 | `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100` | 6 | Sparse w12 + `MUON_NS_MODE=polar` | planned | | | | |
+| S4-G3G1K3 | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` | 7 | Sparse w12 + LeakyReLU^2 + Polar NS | planned | | | | |
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
