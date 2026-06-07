@@ -20,12 +20,12 @@
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
-| S4-G1 | `exp_s4_g1_leakyrelu2_q43_1xh100` | 0 | `MLP_LEAKY_RELU_SLOPE=0.5` | running | | | | |
-| S4-RoPE1 | `exp_s4_rope1_rotary16_q43_1xh100` | 3 | `ROTARY_DIM=16` | running | | | | |
-| S4-K3 | `exp_s4_k3_polarns_q43_1xh100` | 4 | `MUON_NS_MODE=polar` | running | | | | |
-| S4-G1K3 | `exp_s4_g1k3_leaky_polarns_q43_1xh100` | 5 | `MLP_LEAKY_RELU_SLOPE=0.5 MUON_NS_MODE=polar` | running | | | | |
-| S4-G1RoPE | `exp_s4_g1rope16_leaky_rotary16_q43_1xh100` | 6 | `MLP_LEAKY_RELU_SLOPE=0.5 ROTARY_DIM=16` | running | | | | |
-| S4-K3RoPE | `exp_s4_k3rope16_polarns_rotary16_q43_1xh100` | 7 | `MUON_NS_MODE=polar ROTARY_DIM=16` | running | | | | |
+| S4-G1 | `exp_s4_g1_leakyrelu2_q43_1xh100` | 0 | `MLP_LEAKY_RELU_SLOPE=0.5` | completed | 1.1681 | 1.17263005 | 15,747,565 | 负于 Q43；单独 LeakyReLU^2 不保留 |
+| S4-RoPE1 | `exp_s4_rope1_rotary16_q43_1xh100` | 3 | `ROTARY_DIM=16` | completed | 1.1710 | 1.17619727 | 15,663,208 | 负收益；partial RoPE 单项淘汰 |
+| S4-K3 | `exp_s4_k3_polarns_q43_1xh100` | 4 | `MUON_NS_MODE=polar` | completed | 1.1696 | 1.17343709 | 15,714,973 | 负于 Q43；速度更快但质量未保住 |
+| S4-G1K3 | `exp_s4_g1k3_leaky_polarns_q43_1xh100` | 5 | `MLP_LEAKY_RELU_SLOPE=0.5 MUON_NS_MODE=polar` | completed | 1.1656 | 1.16956051 | 15,763,857 | 首批最佳；pre 强但量化后仍负于 Q43，进入 export-only 细扫候选 |
+| S4-G1RoPE | `exp_s4_g1rope16_leaky_rotary16_q43_1xh100` | 6 | `MLP_LEAKY_RELU_SLOPE=0.5 ROTARY_DIM=16` | completed | 1.1677 | 1.17309561 | 15,731,332 | 负于 Q43；RoPE16 组合不继续 |
+| S4-K3RoPE | `exp_s4_k3rope16_polarns_rotary16_q43_1xh100` | 7 | `MUON_NS_MODE=polar ROTARY_DIM=16` | completed | 1.1681 | 1.17323532 | 15,703,692 | 负于 Q43；RoPE16 组合不继续 |
 
 启动检查：
 
@@ -107,6 +107,14 @@ RECURRENCE_ACTIVE=1
 ## CaseOps 状态
 
 当前容器只发现 `/base/datasets/SP8192`，未发现现成 CaseOps dataset、`fineweb_val_bytes_*.bin` 或 `docs_selected.jsonl`。S4-C0 需要先恢复数据链路；在 byte sidecar 可用前，不启动 S4-C1/C2 完整训练。
+
+## 首批结论
+
+- 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
+- 没有实验超过 Q43 的 `1.16735413`。
+- `S4-G1K3` 的 pre-quant BPB `1.1656` 是首批最强训练结果，但 roundtrip BPB `1.16956051` 被量化损失吃掉；下一步优先对该 checkpoint 做 export-only GPTQ/LQER 细扫，而不是直接淘汰 LeakyReLU^2 + Polar NS。
+- `ROTARY_DIM=16` 在单项和组合中都偏负，暂不进入下一轮完整训练。
+- `MUON_NS_MODE=polar` 单项速度较快，step 数 5091，高于其他组；但 roundtrip 未优于 Q43，后续只作为与 LeakyReLU^2 或新结构组合的候选。
 
 ## 记录要求
 
