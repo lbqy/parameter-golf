@@ -220,6 +220,11 @@ RECURRENCE_ACTIVE=1
 | S4-QS23 | `exp_s4_qs23_g3g1k3_rerun_calib32_err095_export` | 5 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.95` | completed | **1.16523055** | 15,754,192 | 新本地最佳 |
 | S4-QS24 | `exp_s4_qs24_g3g1k3_rerun_calib32_err105_export` | 6 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=1.05` | completed | 1.16531921 | 15,756,031 | 负收益 |
 | S4-QS25 | `exp_s4_qs25_g3g1k3_rerun_calib32_top5_export` | 7 | `GPTQ_CALIBRATION_BATCHES=32 LQER_TOP_K=5` | completed | 1.16525101 | 15,755,426 | 与 QS20 持平但更大 |
+| S4-QS26 | `exp_s4_qs26_g3g1k3_rerun_calib32_err090_export` | 3 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.90` | running | | | |
+| S4-QS27 | `exp_s4_qs27_g3g1k3_rerun_calib32_err0925_export` | 4 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.925` | running | | | |
+| S4-QS28 | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` | 5 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.975` | running | | | |
+| S4-QS29 | `exp_s4_qs29_g3g1k3_rerun_calib64_err095_export` | 6 | `GPTQ_CALIBRATION_BATCHES=64 GPTQ_ERROR_SCALE=0.95` | running | | | |
+| S4-QS30 | `exp_s4_qs30_g3g1k3_rerun_calib32_err095_top5_export` | 7 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.95 LQER_TOP_K=5` | running | | | |
 
 启动说明：GPU0 被非本批进程占用约 57GB，先在 GPU 3-7 启动 5 个 error-scale export-only；GPU0 释放后再补 `err070 + rank8` 或 `err070 + calib32`。
 
