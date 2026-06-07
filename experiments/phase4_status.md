@@ -8,9 +8,9 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 本地最佳 | `exp_s4_qs11_g3g1k3_rerun_err095_export`（实际 default export-only，override 被覆盖） |
-| Roundtrip BPB | `1.16528155` |
-| 总字节 | `15,754,229` |
+| 本地最佳 | `exp_s4_qs20_g3g1k3_rerun_calib32_export` |
+| Roundtrip BPB | `1.16524804` |
+| 总字节 | `15,753,986` |
 | Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export`：roundtrip `1.16735413`，总字节 `15,753,494` |
 | 默认训练栈 | Q43/R15 recipe：SP8192 seq4096, QK5, beta2=0.99, grad clip 0.3, tied embed lr 0.04, Muon momentum 0.97, L3-L5 recurrence start 0.30 |
 | 默认导出栈 | GPTQ int6/embed8 + brotli + LQER rank4 top4, `FRESH_MODEL_AFTER_QUANT=1`, `RECURRENCE_ACTIVE=1` |
@@ -210,11 +210,11 @@ RECURRENCE_ACTIVE=1
 | S4-QS13 | `exp_s4_qs13_g3g1k3_rerun_err110_export` | 5 | intended `GPTQ_ERROR_SCALE=1.10` | completed | 1.16528155 | 15,754,229 | override 被默认值覆盖；等价 default export |
 | S4-QS14 | `exp_s4_qs14_g3g1k3_rerun_rank8_export` | 6 | intended `LQER_RANK=8` | completed | 1.16528155 | 15,754,229 | override 被默认值覆盖；等价 default export |
 | S4-QS15 | `exp_s4_qs15_g3g1k3_rerun_calib32_export` | 7 | intended `GPTQ_CALIBRATION_BATCHES=32` | completed | 1.16528155 | 15,754,229 | override 被默认值覆盖；等价 default export |
-| S4-QS16 | `exp_s4_qs16_g3g1k3_rerun_default_export` | 3 | default export-only rerun | running | | | |
-| S4-QS17 | `exp_s4_qs17_g3g1k3_rerun_err095_export` | 4 | `GPTQ_ERROR_SCALE=0.95` | running | | | |
-| S4-QS18 | `exp_s4_qs18_g3g1k3_rerun_err105_export` | 5 | `GPTQ_ERROR_SCALE=1.05` | running | | | |
-| S4-QS19 | `exp_s4_qs19_g3g1k3_rerun_rank8_export` | 6 | `LQER_RANK=8` | running | | | |
-| S4-QS20 | `exp_s4_qs20_g3g1k3_rerun_calib32_export` | 7 | `GPTQ_CALIBRATION_BATCHES=32` | running | | | |
+| S4-QS16 | `exp_s4_qs16_g3g1k3_rerun_default_export` | 3 | default export-only rerun | completed | 1.16528155 | 15,754,229 | default 复现 |
+| S4-QS17 | `exp_s4_qs17_g3g1k3_rerun_err095_export` | 4 | `GPTQ_ERROR_SCALE=0.95` | completed | 1.16530212 | 15,753,626 | 负于 default |
+| S4-QS18 | `exp_s4_qs18_g3g1k3_rerun_err105_export` | 5 | `GPTQ_ERROR_SCALE=1.05` | completed | 1.16530044 | 15,754,506 | 负于 default |
+| S4-QS19 | `exp_s4_qs19_g3g1k3_rerun_rank8_export` | 6 | `LQER_RANK=8` | completed | 1.16528211 | 15,758,307 | 与 default 持平但更大 |
+| S4-QS20 | `exp_s4_qs20_g3g1k3_rerun_calib32_export` | 7 | `GPTQ_CALIBRATION_BATCHES=32` | completed | **1.16524804** | 15,753,986 | 新本地最佳 |
 
 启动说明：GPU0 被非本批进程占用约 57GB，先在 GPU 3-7 启动 5 个 error-scale export-only；GPU0 释放后再补 `err070 + rank8` 或 `err070 + calib32`。
 
@@ -235,6 +235,8 @@ Rerun 结论：checkpoint-safe rerun 复现并超过原 `S4-G3G1K3`，roundtrip 
 QS6-QS10 结论：低 `GPTQ_ERROR_SCALE` 未超过 rerun 默认 `1.0`；`0.85` 最接近但仍负约 `+0.00015 BPB`。下一轮围绕默认附近扫 `0.95/1.05/1.10`，并测试 `rank8`、`calib32`。
 
 QS11-QS15 复盘：launch 命令将 overrides 放在默认 env 之前，导致 `GPTQ_ERROR_SCALE`、`LQER_RANK`、`GPTQ_CALIBRATION_BATCHES` 被后面的默认值覆盖；5 个 run 实际都是 default export-only。该 default export-only roundtrip `1.16528155`，略优于 rerun 内置导出 `1.16529603`，暂记为当前最佳；真实 override sweep 改用新 ID 并将 overrides 放到默认 env 之后。
+
+QS16-QS20 结论：真实 override sweep 中 `GPTQ_ERROR_SCALE=0.95/1.05` 和 rank8 均无收益；`GPTQ_CALIBRATION_BATCHES=32` 小幅改善到 `1.16524804`，成为当前最佳。下一步若继续 export-only，应围绕 `calib32` 测 `calib64`、`calib32+rank8`、`calib32+err0.95/1.05`、`calib32+top5`。
 
 ## 首批结论
 
