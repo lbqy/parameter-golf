@@ -53,6 +53,8 @@ class Hyperparameters:
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
     warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1200))
+    warmdown_frac = float(os.environ.get("WARMDOWN_FRAC", 0.0))
+    min_lr = float(os.environ.get("MIN_LR", 0.0))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
@@ -85,6 +87,38 @@ class Hyperparameters:
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+
+    # Export / quantization mode: rtn (default int8+zlib) or gptq (Hessian SDClip).
+    quant_mode = os.environ.get("QUANT_MODE", "rtn").lower()
+    compressor = os.environ.get("COMPRESSOR", "zlib" if quant_mode == "rtn" else "brotli")
+    gptq_calibration_batches = int(os.environ.get("GPTQ_CALIBRATION_BATCHES", 32))
+    matrix_bits = int(os.environ.get("MATRIX_BITS", 6))
+    embed_bits = int(os.environ.get("EMBED_BITS", 8))
+    matrix_clip_sigmas = float(os.environ.get("MATRIX_CLIP_SIGMAS", 12.85))
+    attn_clip_sigmas = float(os.environ.get("ATTN_CLIP_SIGMAS", 13.0))
+    mlp_clip_sigmas = float(os.environ.get("MLP_CLIP_SIGMAS", 11.5))
+    embed_clip_sigmas = float(os.environ.get("EMBED_CLIP_SIGMAS", 14.0))
+    gptq_scale_mode = os.environ.get("GPTQ_SCALE_MODE", "sigma").lower()
+    gptq_clip_quantile = float(os.environ.get("GPTQ_CLIP_QUANTILE", 0.9999984))
+    gptq_damp = float(os.environ.get("GPTQ_DAMP", 0.01))
+    gptq_act_order = bool(int(os.environ.get("GPTQ_ACT_ORDER", "1")))
+    gptq_error_scale = float(os.environ.get("GPTQ_ERROR_SCALE", 1.0))
+    gptq_scale_floor = float(os.environ.get("GPTQ_SCALE_FLOOR", 1.0))
+    lqer_enabled = bool(int(os.environ.get("LQER_ENABLED", "0")))
+    lqer_rank = int(os.environ.get("LQER_RANK", 4))
+    lqer_top_k = int(os.environ.get("LQER_TOP_K", 3))
+    lqer_factor_bits = int(os.environ.get("LQER_FACTOR_BITS", 4))
+    lqer_asym_enabled = bool(int(os.environ.get("LQER_ASYM_ENABLED", "1")))
+    lqer_asym_group = int(os.environ.get("LQER_ASYM_GROUP", 64))
+
+    # Stage-3 experiment switches.
+    loader_mode = os.environ.get("LOADER_MODE", "sequential").lower()
+    coprime_file_stride = int(os.environ.get("COPRIME_FILE_STRIDE", 17))
+    coprime_token_stride = int(os.environ.get("COPRIME_TOKEN_STRIDE", 1_048_573))
+    recurrence_extra_passes = int(os.environ.get("RECURRENCE_EXTRA_PASSES", 0))
+    recurrence_start_layer = int(os.environ.get("RECURRENCE_START_LAYER", 3))
+    recurrence_end_layer = int(os.environ.get("RECURRENCE_END_LAYER", 5))
+    recurrence_start_frac = float(os.environ.get("RECURRENCE_START_FRAC", 0.35))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -314,12 +348,51 @@ QUANT_CLIP_SEARCH_PCTS = tuple(
     for x in os.environ.get("QUANT_CLIP_SEARCH_PCTS", "0.999,0.9995,0.9999,0.99999,1.0").split(",")
     if x
 )
+QUANT_BITS_OVERRIDES: list[tuple[str, int]] = []
+for item in os.environ.get("QUANT_BITS_OVERRIDES", "").split(","):
+    if not item:
+        continue
+    pattern, _, bits_s = item.partition(":")
+    if not pattern or not bits_s:
+        raise ValueError(f"Bad QUANT_BITS_OVERRIDES item: {item!r}")
+    QUANT_BITS_OVERRIDES.append((pattern, int(bits_s)))
 
 if not (2 <= MATRIX_QUANT_BITS <= 8 and 2 <= EMBED_QUANT_BITS <= 8):
     raise ValueError("MATRIX_QUANT_BITS and EMBED_QUANT_BITS must be in [2, 8]")
+for pattern, bits in QUANT_BITS_OVERRIDES:
+    if not (2 <= bits <= 8):
+        raise ValueError(f"Override bits for {pattern!r} must be in [2, 8], got {bits}")
 
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
+
+
+def compress_quant_bytes(data: bytes, compressor: str) -> bytes:
+    if compressor == "zlib":
+        return zlib.compress(data, level=9)
+    if compressor == "brotli":
+        import brotli
+
+        return brotli.compress(data, quality=11)
+    if compressor == "lzma":
+        import lzma
+
+        return lzma.compress(data, preset=6)
+    raise ValueError(f"Unknown compressor: {compressor!r}")
+
+
+def decompress_quant_bytes(data: bytes, compressor: str) -> bytes:
+    if compressor == "zlib":
+        return zlib.decompress(data)
+    if compressor == "brotli":
+        import brotli
+
+        return brotli.decompress(data)
+    if compressor == "lzma":
+        import lzma
+
+        return lzma.decompress(data)
+    raise ValueError(f"Unknown compressor: {compressor!r}")
 
 def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, str]) -> Tensor:
     if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
@@ -349,6 +422,9 @@ def unpack_unsigned_values(packed: Tensor, bits: int, numel: int) -> np.ndarray:
 
 
 def quant_bits_for_tensor(name: str, t: Tensor) -> int:
+    for pattern, bits in QUANT_BITS_OVERRIDES:
+        if pattern in name:
+            return bits
     if t.ndim == 2 and name == "tok_emb.weight":
         return EMBED_QUANT_BITS
     return MATRIX_QUANT_BITS
@@ -548,18 +624,63 @@ class TokenStream:
 class DistributedTokenLoader:
     # Each call consumes a contiguous chunk from the shared token stream, then slices out
     # one disjoint span per rank. The extra "+1" token lets us build (x, y) by shifting.
-    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+    def __init__(
+        self,
+        pattern: str,
+        rank: int,
+        world_size: int,
+        device: torch.device,
+        mode: str = "sequential",
+        coprime_file_stride: int = 17,
+        coprime_token_stride: int = 1_048_573,
+    ):
         self.rank = rank
         self.world_size = world_size
         self.device = device
-        self.stream = TokenStream(pattern)
+        self.mode = mode
+        self.step = 0
+        self.coprime_file_stride = coprime_file_stride
+        self.coprime_token_stride = coprime_token_stride
+        if mode == "sequential":
+            self.stream = TokenStream(pattern)
+            self.files: list[Path] = []
+            self.cached_file_idx = -1
+            self.cached_tokens: Tensor | None = None
+        elif mode == "coprime":
+            self.stream = None
+            self.files = [Path(p) for p in sorted(glob.glob(pattern))]
+            if not self.files:
+                raise FileNotFoundError(f"No files found for pattern: {pattern}")
+            if math.gcd(coprime_file_stride, len(self.files)) != 1:
+                raise ValueError(
+                    f"COPRIME_FILE_STRIDE={coprime_file_stride} must be coprime with shard count {len(self.files)}"
+                )
+            self.cached_file_idx = -1
+            self.cached_tokens = None
+        else:
+            raise ValueError(f"Unknown LOADER_MODE: {mode!r}")
+
+    def _load_coprime_file(self, file_idx: int) -> Tensor:
+        if file_idx != self.cached_file_idx or self.cached_tokens is None:
+            self.cached_tokens = load_data_shard(self.files[file_idx])
+            self.cached_file_idx = file_idx
+        return self.cached_tokens
 
     def next_batch(self, global_tokens: int, seq_len: int, grad_accum_steps: int) -> tuple[Tensor, Tensor]:
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
-        chunk = self.stream.take(per_rank_span * self.world_size)
-        start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
+        if self.mode == "sequential":
+            assert self.stream is not None
+            chunk = self.stream.take(per_rank_span * self.world_size)
+            start = self.rank * per_rank_span
+            local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
+        else:
+            file_idx = (self.step * self.coprime_file_stride + self.rank) % len(self.files)
+            tokens = self._load_coprime_file(file_idx)
+            max_start = max(tokens.numel() - per_rank_span - 1, 1)
+            offset = (self.step * self.coprime_token_stride + self.rank * per_rank_span) % max_start
+            local = tokens[offset : offset + per_rank_span].to(dtype=torch.int64)
+            self.step += 1
         x = local[:-1].reshape(-1, seq_len)
         y = local[1:].reshape(-1, seq_len)
         return x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
@@ -730,6 +851,10 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        recurrence_extra_passes: int = 0,
+        recurrence_start_layer: int = 3,
+        recurrence_end_layer: int = 5,
+        recurrence_active: bool = False,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -737,6 +862,10 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.recurrence_extra_passes = recurrence_extra_passes
+        self.recurrence_start_layer = recurrence_start_layer
+        self.recurrence_end_layer = recurrence_end_layer
+        self.recurrence_active = recurrence_active
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -777,11 +906,18 @@ class GPT(nn.Module):
         # First half stores skips; second half reuses them in reverse order.
         for i in range(self.num_encoder_layers):
             x = self.blocks[i](x, x0)
+            if self.recurrence_active and self.recurrence_start_layer <= i <= self.recurrence_end_layer:
+                for _ in range(self.recurrence_extra_passes):
+                    x = self.blocks[i](x, x0)
             skips.append(x)
         for i in range(self.num_decoder_layers):
+            layer_idx = self.num_encoder_layers + i
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+            x = self.blocks[layer_idx](x, x0)
+            if self.recurrence_active and self.recurrence_start_layer <= layer_idx <= self.recurrence_end_layer:
+                for _ in range(self.recurrence_extra_passes):
+                    x = self.blocks[layer_idx](x, x0)
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
@@ -888,12 +1024,16 @@ def main() -> None:
     )
     log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
+    log0(
+        f"loader_mode:{args.loader_mode} coprime_file_stride:{args.coprime_file_stride} "
+        f"coprime_token_stride:{args.coprime_token_stride}"
+    )
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
 
     # -----------------------------
     # MODEL + OPTIMIZER SETUP
     # -----------------------------
-
+    initial_recurrence_active = bool(int(os.environ.get("RECURRENCE_ACTIVE", "0"))) or (args.recurrence_extra_passes > 0 and args.recurrence_start_frac <= 0.0)
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -906,6 +1046,10 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
+        recurrence_extra_passes=args.recurrence_extra_passes,
+        recurrence_start_layer=args.recurrence_start_layer,
+        recurrence_end_layer=args.recurrence_end_layer,
+        recurrence_active=initial_recurrence_active,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -969,6 +1113,11 @@ def main() -> None:
     log0("sdp_backends:cudnn=False flash=True mem_efficient=False math=False")
     log0(f"attention_mode:gqa num_heads:{args.num_heads} num_kv_heads:{args.num_kv_heads}")
     log0(
+        f"recurrence_extra_passes:{args.recurrence_extra_passes} "
+        f"recurrence_layers:{args.recurrence_start_layer}-{args.recurrence_end_layer} "
+        f"recurrence_start_frac:{args.recurrence_start_frac}"
+    )
+    log0(
         f"tie_embeddings:{args.tie_embeddings} embed_lr:{token_lr} "
         f"head_lr:{args.head_lr if base_model.lm_head is not None else 0.0} "
         f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr}"
@@ -976,15 +1125,39 @@ def main() -> None:
     log0(
         f"train_batch_tokens:{args.train_batch_tokens} train_seq_len:{args.train_seq_len} "
         f"iterations:{args.iterations} warmup_steps:{args.warmup_steps} "
+        f"warmdown_iters:{args.warmdown_iters} warmdown_frac:{args.warmdown_frac} "
+        f"min_lr:{args.min_lr} "
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
+    log0(
+        f"quant_mode:{args.quant_mode} compressor:{args.compressor} "
+        f"matrix_bits:{args.matrix_bits} embed_bits:{args.embed_bits} "
+        f"gptq_scale_mode:{args.gptq_scale_mode} gptq_damp:{args.gptq_damp} "
+        f"gptq_act_order:{args.gptq_act_order} gptq_error_scale:{args.gptq_error_scale} "
+        f"gptq_scale_floor:{args.gptq_scale_floor} "
+        f"gptq_calibration_batches:{args.gptq_calibration_batches} "
+        f"lqer_enabled:{args.lqer_enabled}"
+    )
+    if args.quant_mode == "rtn":
+        log0(
+            f"rtn_quant_bits:matrix={MATRIX_QUANT_BITS} embed={EMBED_QUANT_BITS} "
+            f"clip_search={QUANT_CLIP_SEARCH} overrides={QUANT_BITS_OVERRIDES}"
+        )
 
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
     # -----------------------------
 
-    train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+    train_loader = DistributedTokenLoader(
+        args.train_files,
+        rank,
+        world_size,
+        device,
+        mode=args.loader_mode,
+        coprime_file_stride=args.coprime_file_stride,
+        coprime_token_stride=args.coprime_token_stride,
+    )
 
     def zero_grad_all() -> None:
         for opt in optimizers:
@@ -993,19 +1166,34 @@ def main() -> None:
     max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
 
     def lr_mul(step: int, elapsed_ms: float) -> float:
+        if args.warmdown_frac > 0:
+            if max_wallclock_ms is None:
+                progress = step / max(args.iterations, 1)
+            else:
+                progress = min(elapsed_ms / max(max_wallclock_ms, 1e-9), 1.0)
+            start = max(1.0 - args.warmdown_frac, 0.0)
+            if progress <= start:
+                return 1.0
+            frac = (1.0 - progress) / max(args.warmdown_frac, 1e-9)
+            return max(args.min_lr, min(frac, 1.0))
         if args.warmdown_iters <= 0:
             return 1.0
         if max_wallclock_ms is None:
             warmdown_start = max(args.iterations - args.warmdown_iters, 0)
-            return max((args.iterations - step) / max(args.warmdown_iters, 1), 0.0) if warmdown_start <= step < args.iterations else 1.0
+            if warmdown_start <= step < args.iterations:
+                return max(args.min_lr, max((args.iterations - step) / max(args.warmdown_iters, 1), 0.0))
+            return 1.0
         step_ms = elapsed_ms / max(step, 1)
         warmdown_ms = args.warmdown_iters * step_ms
         remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0)
-        return remaining_ms / max(warmdown_ms, 1e-9) if remaining_ms <= warmdown_ms else 1.0
+        if remaining_ms <= warmdown_ms:
+            return max(args.min_lr, remaining_ms / max(warmdown_ms, 1e-9))
+        return 1.0
 
+    eval_gptq_artifact_only = bool(int(os.environ.get("EVAL_GPTQ_ARTIFACT_ONLY", "0")))
     # Warmup primes the compiled forward/backward/optimizer paths, then we restore the
     # initial weights/optimizer state so measured training starts from the true init.
-    if args.warmup_steps > 0:
+    if args.warmup_steps > 0 and not eval_gptq_artifact_only:
         initial_model_state = {name: tensor.detach().cpu().clone() for name, tensor in base_model.state_dict().items()}
         initial_optimizer_states = [copy.deepcopy(opt.state_dict()) for opt in optimizers]
         model.train()
@@ -1029,7 +1217,17 @@ def main() -> None:
         zero_grad_all()
         if distributed:
             model.require_backward_grad_sync = True
-        train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+        train_loader = DistributedTokenLoader(
+            args.train_files,
+            rank,
+            world_size,
+            device,
+            mode=args.loader_mode,
+            coprime_file_stride=args.coprime_file_stride,
+            coprime_token_stride=args.coprime_token_stride,
+        )
+
+    export_only = bool(int(os.environ.get("EXPORT_ONLY", "0")))
 
     # -----------------------------
     # MAIN TRAINING LOOP
@@ -1037,11 +1235,19 @@ def main() -> None:
 
     training_time_ms = 0.0
     stop_after_step: int | None = None
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-
     step = 0
-    while True:
+    recurrence_activated = bool(getattr(base_model, "recurrence_active", False))
+
+    if export_only:
+        if not os.path.isfile("final_model.pt"):
+            raise FileNotFoundError("EXPORT_ONLY=1 requires final_model.pt in cwd")
+        base_model.load_state_dict(torch.load("final_model.pt", map_location="cpu"), strict=True)
+        log0("export_only:loaded final_model.pt, skipping training")
+    else:
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+
+    while not export_only and not eval_gptq_artifact_only:
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
 
         should_validate = last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0)
@@ -1077,6 +1283,15 @@ def main() -> None:
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
+        if args.recurrence_extra_passes > 0 and not recurrence_activated:
+            if max_wallclock_ms is None:
+                train_frac = step / max(args.iterations, 1)
+            else:
+                train_frac = min(elapsed_ms / max(max_wallclock_ms, 1e-9), 1.0)
+            if train_frac >= args.recurrence_start_frac:
+                base_model.recurrence_active = True
+                recurrence_activated = True
+                log0(f"recurrence:activated step:{step} train_frac:{train_frac:.4f}")
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1125,49 +1340,136 @@ def main() -> None:
         if stop_after_step is None and reached_cap:
             stop_after_step = step
 
-    log0(
-        f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
-        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
-    )
+    if eval_gptq_artifact_only:
+        log0("eval_gptq_artifact_only:loading existing GPTQ artifact")
+    elif not export_only:
+        log0(
+            f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
+            f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
+        )
+    else:
+        log0("export_only:starting GPTQ export")
 
-    # -----------------------------
-    # SERIALIZATION + ROUNDTRIP VALIDATION
-    # -----------------------------
-    # Save the raw state (useful for debugging/loading in PyTorch directly), then always produce
-    # the compressed int8+zlib artifact and validate the round-tripped weights.
-
-    if master_process:
+    code_bytes = len(code.encode("utf-8"))
+    if master_process and not export_only and not eval_gptq_artifact_only:
         torch.save(base_model.state_dict(), "final_model.pt")
         model_bytes = os.path.getsize("final_model.pt")
-        code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
+    elif export_only:
+        log0(f"export_only:code size: {code_bytes} bytes")
+    elif eval_gptq_artifact_only:
+        log0(f"eval_gptq_artifact_only:code size: {code_bytes} bytes")
+    if args.quant_mode == "gptq":
+        from gptq_export import GptqConfig, dequantize_mixed, export_gptq_artifact, load_gptq_state_dict
 
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
-    quant_buf = io.BytesIO()
-    torch.save(quant_obj, quant_buf)
-    quant_raw = quant_buf.getvalue()
-    quant_blob = zlib.compress(quant_raw, level=9)
-    quant_raw_bytes = len(quant_raw)
-    if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
-            f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
-        code_bytes = len(code.encode("utf-8"))
-        ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
-        log0(
-            f"Serialized model int8+zlib: {quant_file_bytes} bytes "
-            f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
+        gptq_cfg = GptqConfig(
+            matrix_bits=args.matrix_bits,
+            embed_bits=args.embed_bits,
+            matrix_clip_sigmas=args.matrix_clip_sigmas,
+            attn_clip_sigmas=args.attn_clip_sigmas,
+            mlp_clip_sigmas=args.mlp_clip_sigmas,
+            embed_clip_sigmas=args.embed_clip_sigmas,
+            scale_mode=args.gptq_scale_mode,
+            clip_quantile=args.gptq_clip_quantile,
+            damp=args.gptq_damp,
+            act_order=args.gptq_act_order,
+            error_scale=args.gptq_error_scale,
+            scale_floor=args.gptq_scale_floor,
+            calibration_batches=args.gptq_calibration_batches,
+            compressor=args.compressor,
+            lqer_enabled=args.lqer_enabled,
+            lqer_rank=args.lqer_rank,
+            lqer_top_k=args.lqer_top_k,
+            lqer_factor_bits=args.lqer_factor_bits,
+            lqer_asym_enabled=args.lqer_asym_enabled,
+            lqer_asym_group=args.lqer_asym_group,
         )
-        log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
+        quant_artifact = "final_model.gptq.ptz"
+        sd_cpu = {k: v.detach().cpu() for k, v in base_model.state_dict().items()}
+        if eval_gptq_artifact_only:
+            quant_artifact = os.environ.get("EVAL_GPTQ_ARTIFACT", quant_artifact)
+            if not os.path.isfile(quant_artifact): raise FileNotFoundError(f"EVAL_GPTQ_ARTIFACT_ONLY=1 requires {quant_artifact!r}")
+            quant_file_bytes = os.path.getsize(quant_artifact)
+            log0(f"Loaded existing model gptq+{args.compressor}: {quant_file_bytes} bytes")
+            log0(f"Total submission size gptq+{args.compressor}: {quant_file_bytes + code_bytes} bytes")
+        else:
+            t_gptq = time.perf_counter()
+            quant_blob, _quant_meta = export_gptq_artifact(
+                sd_cpu, model, train_loader, args, device, grad_accum_steps, gptq_cfg, log0
+            )
+            log0(f"GPTQ:export finished in {time.perf_counter() - t_gptq:.1f}s")
+            if master_process:
+                with open(quant_artifact, "wb") as f:
+                    f.write(quant_blob)
+                quant_file_bytes = len(quant_blob)
+                log0(f"Serialized model gptq+{args.compressor}: {quant_file_bytes} bytes")
+                log0(f"Total submission size gptq+{args.compressor}: {quant_file_bytes + code_bytes} bytes")
+            if distributed:
+                dist.barrier()
+        quant_state = load_gptq_state_dict(open(quant_artifact, "rb").read(), args.compressor)
+        deq_state = dequantize_mixed(quant_state["w"], quant_state["m"], sd_cpu)
+        base_model.load_state_dict(deq_state, strict=True)
+        roundtrip_state = deq_state
+        roundtrip_tag = f"gptq+{args.compressor}"
+    else:
+        quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
+        quant_buf = io.BytesIO()
+        torch.save(quant_obj, quant_buf)
+        quant_raw = quant_buf.getvalue()
+        quant_blob = compress_quant_bytes(quant_raw, args.compressor)
+        quant_raw_bytes = len(quant_raw)
+        quant_artifact = f"final_model.int8.{args.compressor}.ptz" if args.compressor != "zlib" else "final_model.int8.ptz"
+        if master_process:
+            with open(quant_artifact, "wb") as f:
+                f.write(quant_blob)
+            quant_file_bytes = os.path.getsize(quant_artifact)
+            ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
+            log0(
+                f"Serialized model int8+{args.compressor}: {quant_file_bytes} bytes "
+                f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
+            )
+            log0(f"Total submission size int8+{args.compressor}: {quant_file_bytes + code_bytes} bytes")
+        if distributed:
+            dist.barrier()
+        quant_state = torch.load(io.BytesIO(decompress_quant_bytes(open(quant_artifact, "rb").read(), args.compressor)), map_location="cpu")
+        roundtrip_state = dequantize_state_dict_int8(quant_state)
+        base_model.load_state_dict(roundtrip_state, strict=True)
+        roundtrip_tag = f"int8+{args.compressor}"
 
-    if distributed:
-        dist.barrier()
-    with open("final_model.int8.ptz", "rb") as f:
-        quant_blob_disk = f.read()
-    quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
-    base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
+    if bool(int(os.environ.get("FRESH_MODEL_AFTER_QUANT", "0"))):
+        log0("fresh_model_after_quant:enabled")
+        base_model = GPT(
+            vocab_size=args.vocab_size,
+            num_layers=args.num_layers,
+            model_dim=args.model_dim,
+            num_heads=args.num_heads,
+            num_kv_heads=args.num_kv_heads,
+            mlp_mult=args.mlp_mult,
+            tie_embeddings=args.tie_embeddings,
+            tied_embed_init_std=args.tied_embed_init_std,
+            logit_softcap=args.logit_softcap,
+            rope_base=args.rope_base,
+            qk_gain_init=args.qk_gain_init,
+            recurrence_extra_passes=args.recurrence_extra_passes,
+            recurrence_start_layer=args.recurrence_start_layer,
+            recurrence_end_layer=args.recurrence_end_layer,
+            recurrence_active=recurrence_activated,
+        ).to(device).bfloat16()
+        for module in base_model.modules():
+            if isinstance(module, CastedLinear):
+                module.float()
+        restore_low_dim_params_to_fp32(base_model)
+        base_model.load_state_dict(roundtrip_state, strict=True)
+        compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+        model = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
+
+    if bool(int(os.environ.get("RECOMPILE_AFTER_QUANT", "0"))):
+        log0("recompile_after_quant:enabled")
+        compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+        model = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
+
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
     q_val_loss, q_val_bpb = eval_val(
@@ -1184,10 +1486,10 @@ def main() -> None:
     )
     torch.cuda.synchronize()
     log0(
-        f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
+        f"final_{roundtrip_tag}_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
-    log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+    log0(f"final_{roundtrip_tag}_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
 
     if distributed:
         dist.destroy_process_group()

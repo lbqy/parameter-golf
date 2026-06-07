@@ -2,41 +2,6 @@
 
 本文档面向当前仓库的 `train_gpt.py` 开发，约束假设为：最终提交物不超过 16MB，训练资源为 `1xH100`，训练时间约 `1h`。原始 OpenAI Parameter Golf leaderboard 的主赛道约束是 `8xH100 / 10min / 16MB`，因此本项目在单卡一小时场景下，核心目标可以理解为：在同样 16MB artifact 约束下，用更长的单卡时间补足训练步数，并优先改进单文件训练脚本。
 
-## 0. 当前运行环境速查
-
-当前实验主要在 H100 容器中运行。为了方便会话迁移，完整速查表见 `ref_config.md`。
-
-| 项目 | 当前值 |
-| --- | --- |
-| 宿主项目目录 | `/public/home/lvbqy/project/parameter-golf` |
-| 容器名 | `lbqy0` |
-| 容器项目目录 | `/base/project/parameter-golf` |
-| 推荐训练 Python | `/opt/conda/bin/python` |
-| 推荐训练 torch | `2.6.0+cu126` |
-| `gf` 环境 | torch `2.12.0+cu130`，曾在默认 full batch 下触发 `torch.compile/Inductor` backward shape 错误 |
-| GPU | 8 x NVIDIA H100 80GB HBM3 |
-| 常用空闲卡 | 先查 `nvidia-smi`，最近实验使用 `CUDA_VISIBLE_DEVICES=6,7` |
-
-当前数据位置：
-
-| 数据 | 路径 | 状态 |
-| --- | --- | --- |
-| SP1024 dataset | `/base/project/parameter-golf/data/datasets/fineweb10B_sp1024` | 80 train shards + full val |
-| SP1024 tokenizer | `/base/project/parameter-golf/data/tokenizers/fineweb_1024_bpe.model` | 可用 |
-| SP8192 dataset | `/base/datasets/SP8192/datasets/fineweb10B_sp8192` | 80 train shards + full val |
-| SP8192 tokenizer | `/base/datasets/SP8192/tokenizers/fineweb_8192_bpe.model` | 可用 |
-
-SP8192 是通过用户代理下载的。成功路线是设置 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY=http://59.66.143.200:7897`，并 `unset HF_ENDPOINT` 后访问官方 Hugging Face；`HF_ENDPOINT=https://hf-mirror.com` 在当前环境里会触发 `huggingface_hub` metadata 校验问题。
-
-当前 `train_gpt.py` 相比原 baseline 新增了可选 packed low-bit 导出：
-
-- `MATRIX_QUANT_BITS` / `QUANT_BITS`：矩阵量化 bitwidth，默认 `8`。
-- `EMBED_QUANT_BITS` / `EMBED_BITS`：`tok_emb.weight` 量化 bitwidth，默认同矩阵。
-- `QUANT_CLIP_SEARCH`：是否启用多个 clip percentile 的 MSE 搜索，默认 `0`。
-- `QUANT_CLIP_SEARCH_PCTS`：clip-search 候选分位。
-
-注意：当前实现是 packed int6/int7 后训练量化和 clip-search，不是完整 Hessian-aware GPTQ。
-
 ## 1. 项目结构
 
 仓库整体是一个“可运行 baseline + 数据工具 + 历史优秀提交记录”的结构。
@@ -54,8 +19,6 @@ SP8192 是通过用户代理下载的。成功路线是设置 `HTTP_PROXY/HTTPS_
 | `records/track_non_record_16mb/` | 非主榜或超出标准计算约束但仍满足 16MB 的实验性提交。 |
 | `results/`、`scripts/` | 复现实验、rerun 或辅助脚本。 |
 | `paper/` | 相关实验/论文材料。 |
-| `ref_config.md` | 当前会话迁移速查，包含容器环境、数据路径、已完成 run 和常用命令。 |
-| `*.summary.json` | 精简实验记录，避免从完整 log 中手工提取配置和结果。 |
 
 从开发角度看，根目录 `train_gpt.py` 是“新手友好 baseline”，不是当前 leaderboard SOTA。历史 SOTA 思路主要沉淀在 `records/` 中，例如更大 tokenizer、长上下文、深度复用、并行残差、TTT、GPTQ/AWQ、CaseOps tokenizer 等。
 
@@ -292,3 +255,6 @@ torchrun --standalone --nproc_per_node=1 train_gpt.py
 5. 当前根目录脚本追求简洁，缺少历史 SOTA 中的 TTT、GPTQ、CaseOps、深度复用等高级机制。
 
 因此，推荐路线是：先复现单卡一小时 baseline；再做 LR/warmdown/QK gain/seq len 的小 sweep；确认收益后，再从 `records/track_10min_16mb/` 里挑一个成熟技巧移植到根目录 `train_gpt.py`。
+
+
+
