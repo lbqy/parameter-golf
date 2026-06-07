@@ -168,6 +168,15 @@ RECURRENCE_ACTIVE=1
 
 启动检查：6 个 SparseGate 实验已完成 `warmup_step:20/20` 并进入训练循环；早期 `step_avg` 约 721-730ms，GPU 0/3/4/5/6/7 已被训练进程占用。
 
+中段检查：约 step 1000 时，6 个 SparseGate 实验均仍在运行，GPU 0/3/4/5/6/7 约 95-100% 利用率。
+
+- `exp_s4_g3_sparse_w12_q43_1xh100`：step 1000，step_avg 720.42ms。
+- `exp_s4_g3_sparse_w12_scale05_q43_1xh100`：step 1000，step_avg 714.34ms。
+- `exp_s4_g3_sparse_w24_q43_1xh100`：step 1000，step_avg 712.31ms。
+- `exp_s4_g3g1_sparse_w12_leaky_q43_1xh100`：step 1000，step_avg 720.09ms。
+- `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100`：step 1000，step_avg 715.94ms。
+- `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100`：step 1000，step_avg 719.75ms。
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
