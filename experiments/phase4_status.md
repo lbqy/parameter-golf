@@ -200,6 +200,11 @@ RECURRENCE_ACTIVE=1
 | S4-QS3 | `exp_s4_qs3_g3g1k3_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | failed-start | | | broken checkpoint symlink；未产生结果 |
 | S4-QS4 | `exp_s4_qs4_g3g1k3_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | failed-start | | | broken checkpoint symlink；未产生结果 |
 | S4-QS5 | `exp_s4_qs5_g3g1k3_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | failed-start | | | broken checkpoint symlink；未产生结果 |
+| S4-QS6 | `exp_s4_qs6_g3g1k3_rerun_err050_export` | 3 | `GPTQ_ERROR_SCALE=0.50` | running | | | |
+| S4-QS7 | `exp_s4_qs7_g3g1k3_rerun_err060_export` | 4 | `GPTQ_ERROR_SCALE=0.60` | running | | | |
+| S4-QS8 | `exp_s4_qs8_g3g1k3_rerun_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | running | | | |
+| S4-QS9 | `exp_s4_qs9_g3g1k3_rerun_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | running | | | |
+| S4-QS10 | `exp_s4_qs10_g3g1k3_rerun_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | running | | | |
 
 启动说明：GPU0 被非本批进程占用约 57GB，先在 GPU 3-7 启动 5 个 error-scale export-only；GPU0 释放后再补 `err070 + rank8` 或 `err070 + calib32`。
 
