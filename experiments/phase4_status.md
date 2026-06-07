@@ -189,6 +189,20 @@ RECURRENCE_ACTIVE=1
 
 结论：SparseGate 单项仍负于 Q43，但与 LeakyReLU^2 + Polar NS 叠加后首次打破 Q43：`S4-G3G1K3` roundtrip `1.16622225`，相对 Q43 `1.16735413` 改善约 `-0.00113 BPB`。该路线的 pre BPB `1.1633` 明显强于 Q43，但量化损失仍较大，下一步优先对 `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100/final_model.pt` 做 export-only GPTQ/LQER 细扫，而不是继续扩大 gate 搜索。
 
+## SparseGate G1K3 export-only 量化细扫
+
+基座 checkpoint：`results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100/final_model.pt`。
+
+| ID | RUN_ID | GPU | 改动 | 状态 | Roundtrip BPB | 总字节 | 结论 |
+| --- | --- | ---: | --- | --- | ---: | ---: | --- |
+| S4-QS1 | `exp_s4_qs1_g3g1k3_err050_export` | 3 | `GPTQ_ERROR_SCALE=0.50` | running | | | |
+| S4-QS2 | `exp_s4_qs2_g3g1k3_err060_export` | 4 | `GPTQ_ERROR_SCALE=0.60` | running | | | |
+| S4-QS3 | `exp_s4_qs3_g3g1k3_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | running | | | |
+| S4-QS4 | `exp_s4_qs4_g3g1k3_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | running | | | |
+| S4-QS5 | `exp_s4_qs5_g3g1k3_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | running | | | |
+
+启动说明：GPU0 被非本批进程占用约 57GB，先在 GPU 3-7 启动 5 个 error-scale export-only；GPU0 释放后再补 `err070 + rank8` 或 `err070 + calib32`。
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
