@@ -33,6 +33,16 @@
 - 早期 `step_avg` 约 706-730ms，GPU 0/3/4/5/6/7 利用率约 99-100%。
 - 每个实验目录下保存 `console.log`、`train.pid` 和脚本日志 `logs/<RUN_ID>.txt`。
 
+运行中检查：
+
+- 约 14-17 分钟时，6 个实验均仍在运行，GPU 0/3/4/5/6/7 利用率约 100%。
+- `exp_s4_g1_leakyrelu2_q43_1xh100`：step 1400，step_avg 718.75ms。
+- `exp_s4_rope1_rotary16_q43_1xh100`：step 1200，step_avg 717.74ms。
+- `exp_s4_k3_polarns_q43_1xh100`：step 1400，step_avg 707.93ms。
+- `exp_s4_g1k3_leaky_polarns_q43_1xh100`：step 1400，step_avg 715.44ms。
+- `exp_s4_g1rope16_leaky_rotary16_q43_1xh100`：step 1200，step_avg 720.95ms。
+- `exp_s4_k3rope16_polarns_rotary16_q43_1xh100`：step 1200，step_avg 720.23ms。
+
 ### 公共命令环境
 
 ```bash
