@@ -211,6 +211,8 @@ RECURRENCE_ACTIVE=1
 | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
 | S4-G3G1K3R | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100` | 3 | Sparse w12 + LeakyReLU^2 + Polar NS，run-dir cwd | running | | | | checkpoint-safe rerun |
 
+Rerun 中段检查：step 1600，step_avg 716.42ms，GPU3 约 100% 利用率；训练轨迹与原 `S4-G3G1K3` 接近，checkpoint/artifact 将保存在 run 目录内。
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
