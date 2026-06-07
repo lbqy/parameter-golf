@@ -200,11 +200,11 @@ RECURRENCE_ACTIVE=1
 | S4-QS3 | `exp_s4_qs3_g3g1k3_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | failed-start | | | broken checkpoint symlink；未产生结果 |
 | S4-QS4 | `exp_s4_qs4_g3g1k3_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | failed-start | | | broken checkpoint symlink；未产生结果 |
 | S4-QS5 | `exp_s4_qs5_g3g1k3_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | failed-start | | | broken checkpoint symlink；未产生结果 |
-| S4-QS6 | `exp_s4_qs6_g3g1k3_rerun_err050_export` | 3 | `GPTQ_ERROR_SCALE=0.50` | running | | | |
-| S4-QS7 | `exp_s4_qs7_g3g1k3_rerun_err060_export` | 4 | `GPTQ_ERROR_SCALE=0.60` | running | | | |
-| S4-QS8 | `exp_s4_qs8_g3g1k3_rerun_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | running | | | |
-| S4-QS9 | `exp_s4_qs9_g3g1k3_rerun_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | running | | | |
-| S4-QS10 | `exp_s4_qs10_g3g1k3_rerun_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | running | | | |
+| S4-QS6 | `exp_s4_qs6_g3g1k3_rerun_err050_export` | 3 | `GPTQ_ERROR_SCALE=0.50` | completed | 1.16617189 | 15,753,198 | 负于 rerun 默认 |
+| S4-QS7 | `exp_s4_qs7_g3g1k3_rerun_err060_export` | 4 | `GPTQ_ERROR_SCALE=0.60` | completed | 1.16597539 | 15,753,396 | 负于 rerun 默认 |
+| S4-QS8 | `exp_s4_qs8_g3g1k3_rerun_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | completed | 1.16602903 | 15,755,129 | 负于 rerun 默认 |
+| S4-QS9 | `exp_s4_qs9_g3g1k3_rerun_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | completed | 1.16617498 | 15,753,805 | 负于 rerun 默认 |
+| S4-QS10 | `exp_s4_qs10_g3g1k3_rerun_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | completed | 1.16544857 | 15,753,792 | 负于 rerun 默认但最接近 |
 
 启动说明：GPU0 被非本批进程占用约 57GB，先在 GPU 3-7 启动 5 个 error-scale export-only；GPU0 释放后再补 `err070 + rank8` 或 `err070 + calib32`。
 
@@ -221,6 +221,8 @@ Rerun 中段检查：step 1600，step_avg 716.42ms，GPU3 约 100% 利用率；�
 Rerun 收尾前检查：step 3800，step_avg 717.16ms，GPU3 约 100% 利用率；train loss 轨迹仍贴近原 `S4-G3G1K3`。
 
 Rerun 结论：checkpoint-safe rerun 复现并超过原 `S4-G3G1K3`，roundtrip `1.16529603`，相对 Q43 `1.16735413` 改善约 `-0.00206 BPB`。该 run 的 `final_model.pt` 和 `final_model.gptq.ptz` 均保存在 `results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100/`，可作为后续 export-only 的可靠基座。
+
+QS6-QS10 结论：低 `GPTQ_ERROR_SCALE` 未超过 rerun 默认 `1.0`；`0.85` 最接近但仍负约 `+0.00015 BPB`。下一轮围绕默认附近扫 `0.95/1.05/1.10`，并测试 `rank8`、`calib32`。
 
 ## 首批结论
 
