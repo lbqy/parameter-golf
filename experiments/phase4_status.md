@@ -137,6 +137,15 @@ RECURRENCE_ACTIVE=1
 - `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100`：step_avg 713.76ms。
 - `exp_s4_g2g1_smear_w24_leaky_q43_1xh100`：step_avg 718.43ms。
 
+收尾前检查：约 45 分钟时，6 个 SmearGate 实验均到 step 3800，GPU 0/3/4/5/6/7 约 79-100% 利用率。
+
+- `exp_s4_g2_smear_w12_q43_1xh100`：step_avg 716.41ms。
+- `exp_s4_g2_smear_w24_q43_1xh100`：step_avg 709.92ms。
+- `exp_s4_g2g1_smear_w12_leaky_q43_1xh100`：step_avg 712.14ms。
+- `exp_s4_g2k3_smear_w12_polarns_q43_1xh100`：step_avg 711.89ms。
+- `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100`：step_avg 712.93ms。
+- `exp_s4_g2g1_smear_w24_leaky_q43_1xh100`：step_avg 716.54ms。
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
