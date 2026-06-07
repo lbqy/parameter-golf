@@ -159,12 +159,14 @@ RECURRENCE_ACTIVE=1
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
-| S4-G3 | `exp_s4_g3_sparse_w12_q43_1xh100` | 0 | `SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_WINDOW=12` | planned | | | | |
-| S4-G3S05 | `exp_s4_g3_sparse_w12_scale05_q43_1xh100` | 3 | Sparse w12 + `SPARSE_ATTN_GATE_SCALE=0.5` | planned | | | | |
-| S4-G3W24 | `exp_s4_g3_sparse_w24_q43_1xh100` | 4 | Sparse w24 | planned | | | | |
-| S4-G3G1 | `exp_s4_g3g1_sparse_w12_leaky_q43_1xh100` | 5 | Sparse w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | planned | | | | |
-| S4-G3K3 | `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100` | 6 | Sparse w12 + `MUON_NS_MODE=polar` | planned | | | | |
-| S4-G3G1K3 | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` | 7 | Sparse w12 + LeakyReLU^2 + Polar NS | planned | | | | |
+| S4-G3 | `exp_s4_g3_sparse_w12_q43_1xh100` | 0 | `SPARSE_ATTN_GATE_ENABLED=1 SPARSE_ATTN_GATE_WINDOW=12` | running | | | | |
+| S4-G3S05 | `exp_s4_g3_sparse_w12_scale05_q43_1xh100` | 3 | Sparse w12 + `SPARSE_ATTN_GATE_SCALE=0.5` | running | | | | |
+| S4-G3W24 | `exp_s4_g3_sparse_w24_q43_1xh100` | 4 | Sparse w24 | running | | | | |
+| S4-G3G1 | `exp_s4_g3g1_sparse_w12_leaky_q43_1xh100` | 5 | Sparse w12 + `MLP_LEAKY_RELU_SLOPE=0.5` | running | | | | |
+| S4-G3K3 | `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100` | 6 | Sparse w12 + `MUON_NS_MODE=polar` | running | | | | |
+| S4-G3G1K3 | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` | 7 | Sparse w12 + LeakyReLU^2 + Polar NS | running | | | | |
+
+启动检查：6 个 SparseGate 实验已完成 `warmup_step:20/20` 并进入训练循环；早期 `step_avg` 约 721-730ms，GPU 0/3/4/5/6/7 已被训练进程占用。
 
 ## 首批结论
 
