@@ -8,13 +8,15 @@
 
 | 项目 | 值 |
 | --- | --- |
-| RUN_ID | `exp_s3_q43_r15_clip_top4_rank4_export` |
-| Artifact | `results/experiments/exp_s3_q43_r15_clip_top4_rank4_export/final_model.gptq.ptz` |
-| Roundtrip BPB | **1.16735413** |
-| 总字节 | **15,753,494** |
-| 训练 checkpoint | `exp_s3_r15_b3_qkgain5_hparam_tied004_muon097_recur_l3_5_start030_1xh100/final_model.pt` |
+| RUN_ID | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` |
+| Artifact | `results/experiments/exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export/final_model.gptq.ptz` |
+| Roundtrip BPB | **1.16522320** |
+| 总字节 | **15,755,553** |
+| 训练 checkpoint | `results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100/final_model.pt` |
+| Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export`：1.16735413 / 15,753,494 bytes |
+| records 参考 | `2026-04-27...1.0611`，3-seed mean 约 1.06108 |
 
-优化路线已经从“找一个质量好的训练基座”推进到“在 16 MB 内最大化可保留质量”。最有效的组合是：SP8192 + Seq4096 训练基座，GPTQ int6/embed8 + LQER 压缩，训练侧叠加 `QK_GAIN_INIT=5.0`、更适合量化的 hparam stack、`TIED_EMBED_LR=0.04`、`MUON_MOMENTUM=0.97`，并在训练后 30% 开启 L3-L5 轻量递归。
+优化路线已经从“找一个质量好的训练基座”推进到“在 16 MB 内最大化可保留质量”。第三阶段的 Q43 是根脚本局部最优：SP8192 + Seq4096 训练基座，GPTQ int6/embed8 + LQER 压缩，训练侧叠加 `QK_GAIN_INIT=5.0`、更适合量化的 hparam stack、`TIED_EMBED_LR=0.04`、`MUON_MOMENTUM=0.97`，并在训练后 30% 开启 L3-L5 轻量递归。第四阶段在此基础上加入 SparseGate + LeakyReLU^2 + Polar NS，并通过 `calib32 + GPTQ_ERROR_SCALE=0.975` 导出刷新到 1.16522320；相对 Q43 只改善约 0.00213 BPB，距离 records mean 仍有约 0.10414 BPB 的巨大差距。
 
 ## 约束与核心矛盾
 
@@ -86,32 +88,71 @@
 
 这些负结果很重要：它们说明当前最优不是“把 records 里的所有组件堆上去”，而是在 1h 单卡约束下寻找训练步数、有效深度、量化鲁棒性之间的平衡点。
 
+## 阶段四：records 组件移植与局部收益
+
+第四阶段尝试把 records 中常见但不依赖新数据链路的组件先移植到 Q43 栈上，重点看它们是否能在 1h 和 16 MB 约束下转化为 roundtrip 收益。结果比较明确：SparseGate + LeakyReLU^2 + Polar NS 是唯一打破 Q43 的组合，但提升幅度远小于 SOTA gap。
+
+### 阶段四最佳路径
+
+| 步骤 | RUN_ID | Roundtrip BPB | 总字节 | 判断 |
+| --- | --- | ---: | ---: | --- |
+| Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export` | 1.16735413 | 15,753,494 | 第三阶段最佳 |
+| SparseGate + LeakyReLU^2 + Polar NS | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` | 1.16622225 | 15,756,176 | 首次超过 Q43，但原并行 cwd 覆盖 checkpoint |
+| checkpoint-safe rerun | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100` | 1.16529603 | 15,755,792 | 可靠 checkpoint，复现并超过原 run |
+| final export | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` | **1.16522320** | **15,755,553** | 当前本地最佳 |
+
+阶段四的净收益约为 `1.16735413 - 1.16522320 = 0.00213093 BPB`。这说明 gate/activation/optimizer 组合确实有信号，但这个信号只相当于 SOTA gap 的约 2%，不能改变整体落后格局。
+
+### 阶段四负结果
+
+| 方向 | 代表结果 | 结论 |
+| --- | --- | --- |
+| LeakyReLU^2 单项 | `S4-G1` roundtrip 1.17263005 | 单独替换激活不可用 |
+| partial RoPE / `ROTARY_DIM=16` | `S4-RoPE1` roundtrip 1.17619727 | 当前 partial RoPE 明显负收益 |
+| Polar NS 单项 | `S4-K3` roundtrip 1.17343709 | 速度信号不足以抵消质量损失 |
+| LeakyReLU^2 + Polar NS | `S4-G1K3` pre 1.1656，roundtrip 1.16956051 | pre 强但量化损失吃掉收益 |
+| SmearGate | 最好 `S4-G2G1W24` roundtrip 1.17304535 | 单独接入 Q43 不成立，不代表 records 组合无效 |
+| SparseGate 单项 | `S4-G3` roundtrip 1.16893548 | 单项仍负于 Q43 |
+| SparseGate + Polar NS | `S4-G3K3` roundtrip 1.16774440 | 接近 Q43 但不够 |
+| SparseGate + LeakyReLU^2 + Polar NS | QS28 roundtrip 1.16522320 | 当前唯一有效组合，但收益有限 |
+| export-only 细扫 | QS26-QS30 均在 1.16522 附近 | 已进入约 `1e-5 BPB` 级平台期 |
+
+还有一个工程复盘：第一次 SparseGate 完整批次从项目根目录并行启动，`final_model.pt` 被多个训练进程覆盖，导致根目录 checkpoint 不能可靠归属到最佳 run。后续通过 run-dir cwd 的 checkpoint-safe rerun 修正，并以 `results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100/final_model.pt` 作为唯一可信导出基座。
+
+### 阶段四结论
+
+第四阶段没有证明 records 技术无效，只证明“把少数组件单独移植到 Q43 静态训练栈上”收益很小。SmearGate、SparseGate、LeakyReLU^2、Polar NS 这类组件在 records 中大概率不是孤立增益源，而是与 CaseOps/doc boundary、TTT、parallel residual/lane、压缩布局共同 co-adapt。当前做法缺少这些配套机制，因此只能得到局部小收益或被量化损失吞掉。
+
 ## 当前最优组合的解释
 
-Q43 的训练侧可以理解为三个层次的配合：
+当前最佳 QS28 是 Q43 训练栈上继续叠加 SparseGate + LeakyReLU^2 + Polar NS 后，再做一轮窄幅导出细扫得到的结果。它可以理解为四个层次的配合：
 
 1. `QK_GAIN_INIT=5.0` 和 clip stack 先把基础训练动态调到更适合 SP8192/Seq4096 的区域。
 2. `TIED_EMBED_LR=0.04` 重点照顾大词表 embedding/head 相关参数，这类参数对 BPB 和量化都敏感。
 3. `MUON_MOMENTUM=0.97` 加 L3-L5 轻量递归提高有效建模能力，但只在训练后 30% 开启，避免全程递归拖慢太多 step 或放大早期不稳定。
+4. SparseGate + LeakyReLU^2 + Polar NS 在训练质量上进一步降低 pre BPB；最终通过 `GPTQ_CALIBRATION_BATCHES=32` 和 `GPTQ_ERROR_SCALE=0.975` 保住其中一部分收益。
 
-导出侧选择 GPTQ int6/embed8 + LQER top4 rank4，是因为 matrix int6 提供主要容量节省，embed8 避免大词表质量断崖，LQER 用少量字节修正最大量化误差张量。R15 上 top4 rank4 优于 top3、top5、rank8 和更大 calibration sweep，说明当前 export 已接近局部平台期。
+导出侧仍选择 GPTQ int6/embed8 + LQER top4 rank4，是因为 matrix int6 提供主要容量节省，embed8 避免大词表质量断崖，LQER 用少量字节修正最大量化误差张量。QS28 之后的 export-only 收益已经进入 `1e-5 BPB` 级别，说明当前瓶颈不再是普通 GPTQ/LQER 参数细扫。
 
 ## 为什么距离 SOTA 仍然较远
 
-当前结果是根脚本内的强局部最优，但距离 records 级 SOTA 仍有明显差距，核心原因有五类：
+当前结果是根脚本内的强局部最优，但距离 records 级 SOTA 仍有约 0.10414 BPB 差距。这个 gap 太大，不可能靠 Q43/QS28 周围继续扫 `top_k`、`rank`、`calib`、`error_scale` 或单个小结构开关关闭。更本质的问题是：我们仍在优化一个“普通 token-stream 静态模型”，而 records 级方案很可能已经把数据表示、推理时自适应、结构栈和压缩布局一起改了。
 
-1. 数据和 tokenizer 仍然是普通 SP8192 FineWeb 路线。records 中后期强结果往往依赖 CaseOps、byte sidecar、doc 边界处理等数据链路优化；这类优化直接降低可建模熵，通常不是训练超参能完全补回的。
-2. 模型结构仍偏传统 compact GPT。当前只加入了轻量共享递归，没有实现 parallel residual lane、SparseGate/QuantGate、SmearGate、BOS-safe document handling 等 records 中常见的结构收益。
-3. TTT 仍未真正落地。已测试的只是 lm-head LoRA MVP，且结果明显负收益；records 里的收益来自更严格的 score-before-update、phased TTT、adapter 位置和更新日程设计，不能用当前 MVP 代表上限。
-4. 压缩还有工程余量。当前使用 brotli + packed GPTQ/LQER，但没有 per-group layout、similarity sort、lrzip、专门的 weight ordering 或更细粒度 bit allocation。这些主要提供容量余量，进而允许更有价值的结构参数或修正项进入 16 MB。
-5. 搜索预算仍是局部搜索。单组 1h、单 seed、本地网格扫法对小于 1e-4 的差异很敏感；很多 records 级组合需要更完整的联动调参，而不是单独移植一个开关。
+1. 数据链路缺陷是第一层硬伤。当前仍是普通 SP8192 token stream，缺 CaseOps、byte sidecar、doc boundary 和 BOS sidecar 合规评估。records 路线不是单纯让同一个 token 分布训练得更好，而是降低待预测序列的有效熵，并把 byte 级信息放进合规 sidecar 中。这个收益通常是架构和超参补不回来的。
+2. TTT 还没有真正实现。第三阶段失败的 `ttt_eval.py` 只是 lm-head LoRA、全局连续 token block 更新，不能代表 records 中的 legal/phased TTT。真正可能有收益的版本需要 doc-boundary、score-before-update、单 pass 无 rescoring、multi-phase global SGD、Q/K/V/O/MLP/head adapters、per-doc reset 或 warm-start，并且 forward path 必须镜像训练/导出模型。我们现在缺的是完整机制，不是差一个 LoRA rank。
+3. 结构栈是零散移植，不是共同设计。QS28 只接入了 SparseGate + LeakyReLU^2 + Polar NS；缺 parallel residual / decoder lane、XSA、11L/MLP4x、QuantGate/SmearGate 的正确组合、doc-safe gate 路由等 records 常见组件。单项 ablation 负收益不意外，因为这些组件可能依赖数据链路、TTT 和压缩容量共同适配。
+4. 压缩链路仍在“保质量”，没有“创造容量”。GPTQ/LQER/brotli 已经能把当前模型压进 16 MB，但没有 per-group layout、simsort、lrzip、权重重排、按层 bit allocation 或面向 gate/lane/adapters 的专门编码。没有新的压缩余量，就很难同时放入 embed7/更大结构/adapter/LQER 修正并维持 roundtrip。
+5. 1h 静态训练的有效计算量不够。当前 H100 1h 约 5k optimizer steps，靠静态小模型一次性学完所有分布。records 级方案很可能通过 CaseOps 降低分布难度，通过 TTT 在验证/测试文档上追加合规自适应计算，通过结构栈提高参数效率。我们主要还在做离线训练内的局部优化。
+6. 搜索方式仍是局部爬山。第四阶段大多数实验是“Q43 + 一个开关或两个开关”，这对发现小收益有效，但不适合复现 records 级组合。SOTA gap 是系统性 gap，不是单开关 gap。
+
+所以，本项目当前最本质的缺陷不是 FlashAttention、RoPE、ReLU^2 或某个 kernel 是否还差一点，而是缺少 records 方案里改变问题形态的三件事：数据/sidecar、合法 TTT、结构/压缩联合设计。内核优化仍有价值，但它主要买训练步数或让更复杂结构跑满 1h；如果目标分布和推理机制不变，单靠 kernel 很难把 0.104 BPB 的 gap 打穿。
 
 ## 下一步建议
 
-短期不建议继续在 R15/Q43 周围做大量 top-k、rank、calibration 微扫，因为 Q43 附近已经出现平台期。更值得投入的是三条更高杠杆路径：
+短期不建议继续在 QS28 周围做大量 top-k、rank、calibration、error-scale 微扫，因为导出侧已经出现平台期。若目标是逼近 SOTA，下一阶段需要停止以单开关 ablation 为主线，改成三条高杠杆路径：
 
-1. CaseOps/data sidecar 可行性：先恢复 raw doc stream 和 byte sidecar，验证 BPB 统计合规，再做短训 smoke。
-2. 真正的 legal/phased TTT：不要沿用 lm-head MVP，改为按 records 设计 adapter 位置、phase、score-before-update 和更新预算。
-3. 结构性小参数收益：优先尝试 parallel residual lane 或 gate 类结构，但必须同步设计量化/打包方式，避免 pre BPB 改善被 roundtrip 吃掉。
+1. CaseOps/data sidecar 可行性：先恢复 raw doc stream 和 byte sidecar，验证 `val_bpb:byte_sidecar:enabled`、BOS sidecar 和 doc boundary 合规，再做短训 smoke。
+2. 真正的 legal/phased TTT：不要沿用 lm-head MVP，改为按 records 设计 adapter 位置、phase、score-before-update、单 pass、无 rescoring、per-doc reset/warm-start 和更新预算；先 eval-only 接到 Q43/QS28 artifact 上，看是否至少有 `-0.002 BPB`。
+3. 结构/压缩联合设计：parallel residual / decoder lane、11L/MLP4x、XSA、gate 类结构必须和 per-group compression、simsort/lrzip、专门 bit allocation 一起设计，避免 pre BPB 改善继续被 roundtrip 吃掉。
 
-当前 Q43 是一个清晰里程碑：它证明 GPTQ/LQER 主线、tied embed LR、muon momentum 和轻量递归在 1xH100/1h 约束下可以稳定叠加；同时也说明，下一轮要接近 SOTA，主要瓶颈已经从普通超参搜索转向数据链路、推理时自适应和结构/压缩联合设计。
+当前 QS28 是一个清晰但也令人不舒服的里程碑：它证明 Q43 主线仍能被 SparseGate + LeakyReLU^2 + Polar NS 小幅推进；同时也说明，继续沿着“静态训练 + 普通 token stream + 导出微扫”的路线，只会得到 `1e-3` 到 `1e-5` 级收益，无法逼近 records 级 SOTA。下一轮的成败点必须转向数据链路、推理时自适应和结构/压缩联合设计。
