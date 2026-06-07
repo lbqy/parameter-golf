@@ -107,7 +107,24 @@ RECURRENCE_ACTIVE=1
 
 ## CaseOps 状态
 
-当前容器只发现 `/base/datasets/SP8192`，未发现现成 CaseOps dataset、`fineweb_val_bytes_*.bin` 或 `docs_selected.jsonl`。S4-C0 需要先恢复数据链路；在 byte sidecar 可用前，不启动 S4-C1/C2 完整训练。
+更新：2026-06-08，容器 `b5e2809a5863` / `lbqy0` 内已完成 canonical raw docs 下载，详见 `experiments/caseops_handoff.md`。
+
+| 项目 | 状态 |
+| --- | --- |
+| 容器内项目目录 | `/base/project/parameter-golf` |
+| CaseOps raw docs | `/base/datasets/CaseOps/raw/docs_selected.jsonl`，约 44GB，JSONL 首行读取通过 |
+| raw side manifest | `/base/datasets/CaseOps/raw/docs_selected.source_manifest.json` |
+| CaseOps tokenizer | records 内已有 `fineweb_8192_bpe_lossless_caps_caseops_v1_reserved.model` |
+| 小样本 prepare smoke | 通过；`/tmp/caseops_smoke` 生成 train/val/val_bytes shard |
+| sidecar smoke | 通过；val token shard 与 `fineweb_val_bytes_000000.bin` 长度一致，BOS byte 全为 0 |
+| 根脚本 loader smoke | 通过；当前 `train_gpt.py` 可读取 CaseOps token shard 并完成 1 step + int8 roundtrip |
+| 根脚本 byte-sidecar BPB | 未完成；日志仍为 `val_bpb:enabled tokenizer_kind=sentencepiece`，尚未出现 `val_bpb:byte_sidecar:enabled` |
+
+当前状态应理解为：CaseOps raw docs 已恢复，数据准备脚本和小样本 sidecar 合规性已验证；但完整 CaseOps token dataset 尚未生成，根脚本也尚未接入 `fineweb_val_bytes_*.bin` 作为原始 byte BPB 分母。因此 S4-C0 数据 smoke 已部分完成，S4-C1/C2 完整训练前还需要：
+
+1. 在容器内运行完整 `prepare_caseops_data.py`，生成 `/base/datasets/CaseOps/datasets/fineweb10B_sp8192_lossless_caps_caseops_v1_reserved/{fineweb_train_*.bin,fineweb_val_*.bin,fineweb_val_bytes_*.bin}`。
+2. 修改根目录 `train_gpt.py`：eval 时检测并读取 `fineweb_val_bytes_*.bin`，按 sidecar 原始 byte count 计算 CaseOps BPB。
+3. 再做一次合规 smoke，要求日志出现 `val_bpb:byte_sidecar:enabled`，且 BOS sidecar byte=0。
 
 ## SmearGate 实现状态
 
