@@ -122,12 +122,14 @@ RECURRENCE_ACTIVE=1
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | --- |
-| S4-QG1 | `exp_s4_qg1_g1k3_top4_rank4_calib32_export` | 0 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=32` | running | | | |
-| S4-QG2 | `exp_s4_qg2_g1k3_top4_rank8_calib32_export` | 3 | `LQER_TOP_K=4 LQER_RANK=8 GPTQ_CALIBRATION_BATCHES=32` | running | | | |
-| S4-QG3 | `exp_s4_qg3_g1k3_top5_rank4_calib32_export` | 4 | `LQER_TOP_K=5 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=32` | running | | | |
-| S4-QG4 | `exp_s4_qg4_g1k3_top4_rank4_calib64_export` | 5 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=64` | running | | | |
-| S4-QG5 | `exp_s4_qg5_g1k3_top4_rank4_err075_export` | 6 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_ERROR_SCALE=0.75` | running | | | |
-| S4-QG6 | `exp_s4_qg6_g1k3_top4_rank4_err125_export` | 7 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_ERROR_SCALE=1.25` | running | | | |
+| S4-QG1 | `exp_s4_qg1_g1k3_top4_rank4_calib32_export` | 0 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=32` | completed | 1.16990228 | 15,765,056 | 未优于 QG5 |
+| S4-QG2 | `exp_s4_qg2_g1k3_top4_rank8_calib32_export` | 3 | `LQER_TOP_K=4 LQER_RANK=8 GPTQ_CALIBRATION_BATCHES=32` | completed | 1.16990251 | 15,768,927 | rank8 无收益 |
+| S4-QG3 | `exp_s4_qg3_g1k3_top5_rank4_calib32_export` | 4 | `LQER_TOP_K=5 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=32` | completed | 1.16990255 | 15,765,516 | top5 无收益 |
+| S4-QG4 | `exp_s4_qg4_g1k3_top4_rank4_calib64_export` | 5 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_CALIBRATION_BATCHES=64` | completed | 1.17028975 | 15,764,969 | calib64 负收益 |
+| S4-QG5 | `exp_s4_qg5_g1k3_top4_rank4_err075_export` | 6 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_ERROR_SCALE=0.75` | completed | **1.16810703** | 15,763,516 | G1K3 当前最佳；继续扫低 error_scale |
+| S4-QG6 | `exp_s4_qg6_g1k3_top4_rank4_err125_export` | 7 | `LQER_TOP_K=4 LQER_RANK=4 GPTQ_ERROR_SCALE=1.25` | completed | 1.17247441 | 15,764,980 | 明显负收益 |
+
+结论：G1K3 的量化最敏感旋钮是 `GPTQ_ERROR_SCALE`。`0.75` 明显优于默认 `1.0`，但仍未超过 Q43；第二轮围绕 `0.50-0.85` 和 `err075 + rank/top/calib` 继续 export-only。
 
 ## 记录要求
 
