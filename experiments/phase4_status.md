@@ -128,6 +128,15 @@ RECURRENCE_ACTIVE=1
 
 启动检查：6 个 SmearGate 实验已完成 `warmup_step:20/20` 并进入训练循环；早期 `step_avg` 约 720-731ms，GPU 0/3/4/5/6/7 约 95-100% 利用率。
 
+中段检查：约 14 分钟时，6 个 SmearGate 实验均到 step 1200，GPU 0/3/4/5/6/7 约 91-100% 利用率。
+
+- `exp_s4_g2_smear_w12_q43_1xh100`：step_avg 717.26ms。
+- `exp_s4_g2_smear_w24_q43_1xh100`：step_avg 710.86ms。
+- `exp_s4_g2g1_smear_w12_leaky_q43_1xh100`：step_avg 713.56ms。
+- `exp_s4_g2k3_smear_w12_polarns_q43_1xh100`：step_avg 713.11ms。
+- `exp_s4_g2g1k3_smear_w12_leaky_polarns_q43_1xh100`：step_avg 713.76ms。
+- `exp_s4_g2g1_smear_w24_leaky_q43_1xh100`：step_avg 718.43ms。
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
