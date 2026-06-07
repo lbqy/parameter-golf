@@ -205,6 +205,11 @@ RECURRENCE_ACTIVE=1
 | S4-QS8 | `exp_s4_qs8_g3g1k3_rerun_err070_export` | 5 | `GPTQ_ERROR_SCALE=0.70` | completed | 1.16602903 | 15,755,129 | 负于 rerun 默认 |
 | S4-QS9 | `exp_s4_qs9_g3g1k3_rerun_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75` | completed | 1.16617498 | 15,753,805 | 负于 rerun 默认 |
 | S4-QS10 | `exp_s4_qs10_g3g1k3_rerun_err085_export` | 7 | `GPTQ_ERROR_SCALE=0.85` | completed | 1.16544857 | 15,753,792 | 负于 rerun 默认但最接近 |
+| S4-QS11 | `exp_s4_qs11_g3g1k3_rerun_err095_export` | 3 | `GPTQ_ERROR_SCALE=0.95` | running | | | |
+| S4-QS12 | `exp_s4_qs12_g3g1k3_rerun_err105_export` | 4 | `GPTQ_ERROR_SCALE=1.05` | running | | | |
+| S4-QS13 | `exp_s4_qs13_g3g1k3_rerun_err110_export` | 5 | `GPTQ_ERROR_SCALE=1.10` | running | | | |
+| S4-QS14 | `exp_s4_qs14_g3g1k3_rerun_rank8_export` | 6 | `LQER_RANK=8` | running | | | |
+| S4-QS15 | `exp_s4_qs15_g3g1k3_rerun_calib32_export` | 7 | `GPTQ_CALIBRATION_BATCHES=32` | running | | | |
 
 启动说明：GPU0 被非本批进程占用约 57GB，先在 GPU 3-7 启动 5 个 error-scale export-only；GPU0 释放后再补 `err070 + rank8` 或 `err070 + calib32`。
 
