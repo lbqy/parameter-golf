@@ -8,9 +8,9 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 本地最佳 | `exp_s4_qs23_g3g1k3_rerun_calib32_err095_export` |
-| Roundtrip BPB | `1.16523055` |
-| 总字节 | `15,754,192` |
+| 本地最佳 | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` |
+| Roundtrip BPB | `1.16522320` |
+| 总字节 | `15,755,553` |
 | Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export`：roundtrip `1.16735413`，总字节 `15,753,494` |
 | 默认训练栈 | Q43/R15 recipe：SP8192 seq4096, QK5, beta2=0.99, grad clip 0.3, tied embed lr 0.04, Muon momentum 0.97, L3-L5 recurrence start 0.30 |
 | 默认导出栈 | GPTQ int6/embed8 + brotli + LQER rank4 top4, `FRESH_MODEL_AFTER_QUANT=1`, `RECURRENCE_ACTIVE=1` |
@@ -220,11 +220,11 @@ RECURRENCE_ACTIVE=1
 | S4-QS23 | `exp_s4_qs23_g3g1k3_rerun_calib32_err095_export` | 5 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.95` | completed | **1.16523055** | 15,754,192 | 新本地最佳 |
 | S4-QS24 | `exp_s4_qs24_g3g1k3_rerun_calib32_err105_export` | 6 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=1.05` | completed | 1.16531921 | 15,756,031 | 负收益 |
 | S4-QS25 | `exp_s4_qs25_g3g1k3_rerun_calib32_top5_export` | 7 | `GPTQ_CALIBRATION_BATCHES=32 LQER_TOP_K=5` | completed | 1.16525101 | 15,755,426 | 与 QS20 持平但更大 |
-| S4-QS26 | `exp_s4_qs26_g3g1k3_rerun_calib32_err090_export` | 3 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.90` | running | | | |
-| S4-QS27 | `exp_s4_qs27_g3g1k3_rerun_calib32_err0925_export` | 4 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.925` | running | | | |
-| S4-QS28 | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` | 5 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.975` | running | | | |
-| S4-QS29 | `exp_s4_qs29_g3g1k3_rerun_calib64_err095_export` | 6 | `GPTQ_CALIBRATION_BATCHES=64 GPTQ_ERROR_SCALE=0.95` | running | | | |
-| S4-QS30 | `exp_s4_qs30_g3g1k3_rerun_calib32_err095_top5_export` | 7 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.95 LQER_TOP_K=5` | running | | | |
+| S4-QS26 | `exp_s4_qs26_g3g1k3_rerun_calib32_err090_export` | 3 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.90` | completed | 1.16523234 | 15,755,155 | 负于 QS28 |
+| S4-QS27 | `exp_s4_qs27_g3g1k3_rerun_calib32_err0925_export` | 4 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.925` | completed | 1.16524198 | 15,753,910 | 负于 QS28 |
+| S4-QS28 | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` | 5 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.975` | completed | **1.16522320** | 15,755,553 | 新本地最佳 |
+| S4-QS29 | `exp_s4_qs29_g3g1k3_rerun_calib64_err095_export` | 6 | `GPTQ_CALIBRATION_BATCHES=64 GPTQ_ERROR_SCALE=0.95` | completed | 1.16527872 | 15,754,247 | 负收益 |
+| S4-QS30 | `exp_s4_qs30_g3g1k3_rerun_calib32_err095_top5_export` | 7 | `GPTQ_CALIBRATION_BATCHES=32 GPTQ_ERROR_SCALE=0.95 LQER_TOP_K=5` | completed | 1.16523193 | 15,756,193 | 接近但更大，负于 QS28 |
 
 启动说明：GPU0 被非本批进程占用约 57GB，先在 GPU 3-7 启动 5 个 error-scale export-only；GPU0 释放后再补 `err070 + rank8` 或 `err070 + calib32`。
 
@@ -249,6 +249,8 @@ QS11-QS15 复盘：launch 命令将 overrides 放在默认 env 之前，导致 `
 QS16-QS20 结论：真实 override sweep 中 `GPTQ_ERROR_SCALE=0.95/1.05` 和 rank8 均无收益；`GPTQ_CALIBRATION_BATCHES=32` 小幅改善到 `1.16524804`，成为当前最佳。下一步若继续 export-only，应围绕 `calib32` 测 `calib64`、`calib32+rank8`、`calib32+err0.95/1.05`、`calib32+top5`。
 
 QS21-QS25 结论：`calib32 + GPTQ_ERROR_SCALE=0.95` 小幅刷新到 `1.16523055`；`calib64`、`rank8`、`top5` 无收益。最后一轮若继续，应围绕 `calib32 + err0.95` 做窄扫：`err0.90/0.925/0.975`，以及 `err0.95 + top5/calib64`。
+
+QS26-QS30 结论：`calib32 + GPTQ_ERROR_SCALE=0.975` 小幅刷新到 `1.16522320`；`err0.90/0.925` 和 `err0.95+top5/calib64` 未继续改善。当前 export-only 收益已进入 `~1e-5 BPB` 级别，后续优先级应低于新的结构/数据/TTT 主线。
 
 ## 首批结论
 
