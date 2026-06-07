@@ -177,6 +177,15 @@ RECURRENCE_ACTIVE=1
 - `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100`：step 1000，step_avg 715.94ms。
 - `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100`：step 1000，step_avg 719.75ms。
 
+收尾前检查：约 step 3800 时，6 个 SparseGate 实验均仍在运行，GPU 0/3/4/5/6/7 约 87-100% 利用率。
+
+- `exp_s4_g3_sparse_w12_q43_1xh100`：step 3800，step_avg 719.39ms。
+- `exp_s4_g3_sparse_w12_scale05_q43_1xh100`：step 3800，step_avg 713.56ms。
+- `exp_s4_g3_sparse_w24_q43_1xh100`：step 3800，step_avg 712.40ms。
+- `exp_s4_g3g1_sparse_w12_leaky_q43_1xh100`：step 3800，step_avg 719.58ms。
+- `exp_s4_g3k3_sparse_w12_polarns_q43_1xh100`：step 3800，step_avg 715.40ms。
+- `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100`：step 3800，step_avg 719.14ms。
+
 ## 首批结论
 
 - 首批 6 个 1h 实验均合规完成，所有 artifact 总字节均小于 16,000,000。
