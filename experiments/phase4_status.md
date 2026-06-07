@@ -8,9 +8,9 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 本地最佳 | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` |
-| Roundtrip BPB | `1.16622225` |
-| 总字节 | `15,756,176` |
+| 本地最佳 | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100` |
+| Roundtrip BPB | `1.16529603` |
+| 总字节 | `15,755,792` |
 | Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export`：roundtrip `1.16735413`，总字节 `15,753,494` |
 | 默认训练栈 | Q43/R15 recipe：SP8192 seq4096, QK5, beta2=0.99, grad clip 0.3, tied embed lr 0.04, Muon momentum 0.97, L3-L5 recurrence start 0.30 |
 | 默认导出栈 | GPTQ int6/embed8 + brotli + LQER rank4 top4, `FRESH_MODEL_AFTER_QUANT=1`, `RECURRENCE_ACTIVE=1` |
@@ -191,7 +191,7 @@ RECURRENCE_ACTIVE=1
 
 ## SparseGate G1K3 export-only 量化细扫
 
-基座 checkpoint：`results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100/final_model.pt`。
+基座 checkpoint：`results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100/final_model.pt`。
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | --- |
@@ -209,11 +209,13 @@ RECURRENCE_ACTIVE=1
 
 | ID | RUN_ID | GPU | 改动 | 状态 | Pre BPB | Roundtrip BPB | 总字节 | 结论 |
 | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |
-| S4-G3G1K3R | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100` | 3 | Sparse w12 + LeakyReLU^2 + Polar NS，run-dir cwd | running | | | | checkpoint-safe rerun |
+| S4-G3G1K3R | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100` | 3 | Sparse w12 + LeakyReLU^2 + Polar NS，run-dir cwd | completed | 1.1635 | **1.16529603** | 15,755,792 | 新本地最佳；checkpoint 已保存在 run 目录 |
 
 Rerun 中段检查：step 1600，step_avg 716.42ms，GPU3 约 100% 利用率；训练轨迹与原 `S4-G3G1K3` 接近，checkpoint/artifact 将保存在 run 目录内。
 
 Rerun 收尾前检查：step 3800，step_avg 717.16ms，GPU3 约 100% 利用率；train loss 轨迹仍贴近原 `S4-G3G1K3`。
+
+Rerun 结论：checkpoint-safe rerun 复现并超过原 `S4-G3G1K3`，roundtrip `1.16529603`，相对 Q43 `1.16735413` 改善约 `-0.00206 BPB`。该 run 的 `final_model.pt` 和 `final_model.gptq.ptz` 均保存在 `results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100/`，可作为后续 export-only 的可靠基座。
 
 ## 首批结论
 
