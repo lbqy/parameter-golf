@@ -131,6 +131,17 @@ RECURRENCE_ACTIVE=1
 
 结论：G1K3 的量化最敏感旋钮是 `GPTQ_ERROR_SCALE`。`0.75` 明显优于默认 `1.0`，但仍未超过 Q43；第二轮围绕 `0.50-0.85` 和 `err075 + rank/top/calib` 继续 export-only。
 
+## G1K3 export-only 第二轮
+
+| ID | RUN_ID | GPU | 改动 | 状态 | Roundtrip BPB | 总字节 | 结论 |
+| --- | --- | ---: | --- | --- | ---: | ---: | --- |
+| S4-QG7 | `exp_s4_qg7_g1k3_top4_rank4_err050_export` | 0 | `GPTQ_ERROR_SCALE=0.50` | running | | | |
+| S4-QG8 | `exp_s4_qg8_g1k3_top4_rank4_err060_export` | 3 | `GPTQ_ERROR_SCALE=0.60` | running | | | |
+| S4-QG9 | `exp_s4_qg9_g1k3_top4_rank4_err070_export` | 4 | `GPTQ_ERROR_SCALE=0.70` | running | | | |
+| S4-QG10 | `exp_s4_qg10_g1k3_top4_rank4_err085_export` | 5 | `GPTQ_ERROR_SCALE=0.85` | running | | | |
+| S4-QG11 | `exp_s4_qg11_g1k3_top4_rank8_err075_export` | 6 | `GPTQ_ERROR_SCALE=0.75 LQER_RANK=8` | running | | | |
+| S4-QG12 | `exp_s4_qg12_g1k3_top4_rank4_err075_calib32_export` | 7 | `GPTQ_ERROR_SCALE=0.75 GPTQ_CALIBRATION_BATCHES=32` | running | | | |
+
 ## 记录要求
 
 每个实验完成后记录：
