@@ -440,6 +440,48 @@ RECURRENCE_ACTIVE=1
 
 ## 第五阶段：CaseOps 合规链路与 SOTA 主线重启（规划）
 
+### 2026-06-08 实时修正
+
+S5-C0/C1/C2 已完成：CaseOps 80 train shards、1 val shard、1 byte sidecar shard 已生成，full verifier 通过；根目录 `train_gpt.py` 已接入 `fineweb_val_bytes_*.bin`，并修复 `fineweb_val_*.bin` 误匹配 byte sidecar 的问题。真实训练日志已出现 `val_bpb:byte_sidecar:enabled`。
+
+S5-C4/C5/C4b 首批 1xH100/1h 结果显示：root 静态模型直接切 CaseOps 并没有刷新 Phase 4 最佳。最佳完成结果是 S5-C5 `1.17380957`，明显负于普通 SP8192 QS28 的 `1.16522320`。因此后续不再做宽泛的 CaseOps root sweep；CaseOps 只保留三类目标实验：
+
+1. schedule 诊断：S5-C6 用 CaseOps + records-like LR/warmdown 判断 C4/C5 是否只是调度不匹配。
+2. records 栈验证：S5-R0 跑 2026-04-27 advanced stack 的单卡 fallback，判断 CaseOps 是否依赖 doc-boundary/TTT/结构联合设计。
+3. true legal TTT：优先实现 score-before-update、single pass、no rescoring 的 doc-level eval path，而不是继续复用第三阶段 lm-head-only TTT。
+
+空闲 GPU 的主线临时回到普通 SP8192 QS28，跑 S5-O1/S5-O2 检查训练动态是否还能突破平台期：records-like LR/warmdown 与更大 `TRAIN_BATCH_TOKENS=786432`。若这两条仍未超过 QS28，下一步应转向 TTT/结构联合实现，而不是继续做导出微扫。
+
+S5-O1/O2/C6 首批结果已回收：O2 `TRAIN_BATCH_TOKENS=786432` 刷新到 `1.16474115`，是 Phase 5 第一个真实改善；O1 records-like LR/warmdown 量化后退化到 `1.16649737`，C6 CaseOps schedule 仍为 `1.17440583`。O2 checkpoint 的 export-only 窄扫中，Q1 `GPTQ_ERROR_SCALE=0.95` 进一步刷新到 `1.16465057`。O6 继续把 batch 上探到 `1,048,576` 后退化到 `1.16711896`，说明 O2 附近不是“越大越好”。O7-O10 的 bracket 最好是 O8 `TRAIN_BATCH_TOKENS=917504` 的 `1.16357912`，O9 later recurrence 基本持平 `1.16359641`；root QS28 仍能挤出小收益，但已被 records+lrzip+TTT 主线大幅超过。后续普通 SP8192 路线降为备份，不再消耗主要 GPU 配额。
+
+结构/容量线出现强信号：S5-O5 `NUM_LAYERS=10` + int5/embed8 有效刷新到 `1.16432394`，但更重要的是 S5-O4 `MLP_MULT=3` + int5/embed8 取得 `1.15317521`，总字节 `16,806,331`，超 16MB 约 806KB。O4 不算有效提交，但它证明更宽 MLP 的 pre/roundtrip 质量大幅优于 QS28；后续优先做 O4 checkpoint 的容量修复（embed7、LQER top/rank、按层 bit、per-group/lrzip/brotli），而不是继续只追 `1e-4` 级 batch 微调。
+
+O4 容量修复阶段性结论：P3 `embed7` 去 LQER 后仍为 `1.16400331` / `16,531,775` bytes，P4 `embed6 + LQER top3 + err0.95` 虽压到 `15,898,791` bytes，但 BPB 退化到 `1.16583102`，不如 S5-O5。因此 O4 只靠现有 bit/LQER 旋钮已经不值得继续；除非加入更强 per-group/simsort/packing，否则 GPU 优先级下调。
+
+records 04-27 fallback 线成为新的主线：R1 checkpoint 在补齐 FA3/SDPA/TensorDescriptor/per-group fallback 后，R1Q2 已经完成量化验证，`val_bpb=1.09951341`，但 fallback-compressed 提交大小 `16,081,772` bytes，按 16,000,000-byte 上限超约 82KB。R1Q3 `EMBED_BITS=6 + LQER_TOP_K=3` 压到 `15,557,072` bytes，BPB `1.10542246`，成为第一条有效 near-1.10；R1Q4 `EMBED_BITS=7 + LQER_TOP_K=2` 几乎不损质量（`1.09951899`）但仍为 `16,079,398` bytes，说明 top_k 不是主要容量来源。自适应 brotli/lzma fallback（R1Q5/R1Q6）没有解决容量问题；安装真实外部 `lrzip` 后，R1Q7 用同一 embed7/top3 权重压到 `15,925,658` bytes，诊断 BPB 保持 `1.09951341`。R1Q2 的 3-phase TTT 长跑完成，post-TTT `1.08464298`，说明 TTT 仍有约 `0.0149 BPB` 收益；R1Q3T 的 embed6 artifact 也从 `1.10542246` 降到 `1.09020482`，证明 TTT 不是 embed7 特例，但 embed7/top3 更优。R1Q7T 已用合法 `lrzip` artifact 直接复现 3-phase TTT：post-TTT `1.08464351`，总字节 `15,925,658`，成为当前 Phase 5 有效最好。最终候选必须明确依赖真实 `lrzip` 可用，不能退回 fallback 压缩；若要继续逼近 `1.06`，下一步应围绕 R1Q7T 做 TTT 超参/phase/doc-prefix 优化或结构压缩联合，而不是再做 root QS28 微调。
+
+与 2026-04-27 records 对照后，当前主要 gap 不在 TTT 是否有效，而在训练质量/吞吐：R1Q7T 的 TTT 收益约 `0.0149 BPB`，与 records phased TTT 的量级相近；但 R1Q7 的 no-TTT 起点 `1.09951341` 明显差于 records post-quant 约 `1.073-1.075`。因此当前 Phase 5 主线拆成两条并行分支：一是 T3-T8 固定 R1Q7 合法 artifact 扫 `prefix_docs`、phase 数和 `GLOBAL_TTT_LR`，寻找是否能低于 `1.08464351`；二是 R2/R3 复跑 records 04-27 同栈 seed42/seed0 的 1xH100 legal-lrzip 训练，判断单卡 fallback 下是否存在 seed 方差或更好训练轨迹。若 T3-T8 不能刷新且 R2/R3 no-TTT 仍在 `1.09+`，下一步应优先处理 FA3/fused MLP/训练吞吐 blocker，而不是继续增加 TTT 小扫。
+
+T3-T8 已回收：最佳为 T5 `PHASED_TTT_PREFIX_DOCS=2500`、`PHASED_TTT_NUM_PHASES=4`，post-TTT `1.08461728`，只比 R1Q7T 默认好 `0.00002623 BPB`。这是一个真实刷新，但收益太小，不能改变主判断：TTT 近邻已接近平台。T9-T14 只做一次 4-phase 邻域确认（prefix 2000/2250/2750、5 phases、lr 0.0013/0.0015）；若仍只有 `1e-5` 级收益，停止 TTT 小扫，把 GPU 转给 records 训练质量/吞吐 blocker。
+
+T9-T14 已确认平台：最佳 T12 `4 phases + GLOBAL_TTT_LR=0.0015` 到 `1.08458960`，相对 R1Q7T 只改善约 `0.000054 BPB`。因此 TTT 小扫停止，当前合法最好暂记 T12，但 Phase 5 后续主线转向训练起点。R2/R3/R9 覆盖 records seeds 42/0/1234；R4-R6 延后 layer loop 到 0.50/0.65/0.90，R7 测 917k batch，R8 测 `WARMDOWN_FRAC=0.95`。这些实验的判断标准是 no-TTT roundtrip 是否明显低于 R1Q7 的 `1.09951341`；若仍无改善，则 blocker 是单卡 fallback 吞吐/内核而不是超参。
+
+R2/R3 已回收首个训练质量正信号：seed42 R2 训练 3188 steps，no-TTT roundtrip `1.09686294`，默认 3-phase TTT 后 `1.08218120`，刷新 Phase 5 合法最好并略优于 2026-04-06 记录 `1.08279`；seed0 R3 为 `1.09803468 -> 1.08311378`，也优于 R1Q7 但不如 R2。R2T12/R3T12 正在把 T12 的 `4 phases + GLOBAL_TTT_LR=0.0015` 迁移到 R2/R3 artifact；若能保持 T12 的小收益，R2 可能再降到约 `1.08213`。R4-R9 继续验证延后 loop、batch917k、warmdown095、seed1234 是否能进一步降低 no-TTT 起点。
+
+R2T12/R3T12 已回收：R2T12 `1.08217886` 只比 R2 默认 TTT 好 `0.00000234 BPB`，R3T12 为 `1.08306801`。这确认 TTT 近邻不是主要杠杆；当前有效最好仍是 R2 系。R4-R6 中段显示延后 loop 能显著保持吞吐，尤其 R6 `loop090` 到 3500 step 仍约 `882k tok/s`，但 train loss 是否转化为更低 BPB 仍需最终 eval。基于这个中段信号，R10/R11 已启动：`loop080` 与 `loop090 + warmdown095`。
+
+R4-R9 已把训练动态方向收窄：R8 `WARMDOWN_FRAC=0.95` 成为新的有效最好，no-TTT `1.09647097`、post-TTT `1.08179851`、总字节 `15,924,510`。延后 loop 单独不成立：R4/R5 虽增加步数但 post-TTT 只到 `1.08375/1.08320`，R6 `loop090` 直接退化到 `1.10134`；batch917k 也退化到 `1.08561`。因此后续主线从“loop/吞吐”改为“warmdown 邻域与跨 seed”：R8T12 迁移 T12 TTT 设置，R12/R13 探 `WARMDOWN_FRAC=0.90/0.98`，R14/R15 验证 seed0/1234 上 warmdown095 是否普适，R16 只作为 early-loop+warmdown 的交互诊断。
+
+R8T12 已回收为 `1.08180270`，略差于 R8 默认 TTT，说明 R8 artifact 上不需要继续 TTT 微调。R17 追加 `WARMDOWN_FRAC=0.95 + MIN_LR=0.2`，用于判断 R8 的收益是否来自更晚/更弱的学习率衰减。
+
+R10/R11 已关闭延后 loop 分支：`loop080` post-TTT `1.08734365`，`loop090 + warmdown095` `1.10325317`，均明显负于 R8。R18/R19 补充 warmdown/min_lr 邻域（0.95+0.15、0.98+0.2），当前第五阶段活线只剩 warmdown/min_lr 与跨 seed 验证。
+
+R17 `MIN_LR=0.2` 的 no-TTT 已明显负向，说明不能简单提高最低学习率；R20 补充 `WARMDOWN_FRAC=0.94`，在 R8 的 0.95 附近做最后的窄扫。
+
+R12-R17 收口：warmdown 0.90/0.98 都没有超过 R8 的 0.95；warmdown095 在 seed0/1234 上也不如 seed42；early-loop+warmdown 与 `MIN_LR=0.2` 均负向。因此训练侧当前唯一仍未收口的是 R20 `WARMDOWN_FRAC=0.94` 和 R18/R19 的 min_lr 邻域。并行启动 R8 checkpoint 的 export-only 量化微扫（R8Q1-Q5：err0.95、calib32/64、err1.05、top4），目标是在 R8 no-TTT `1.09647097` 基础上不重训再降一点；若 export sweep 无法改善，则 Phase 5 最好候选保持 R8 `1.08179851`。
+
+R18/R19/R20 与 R8Q1-Q5 已全部回收且未刷新。最终 Phase 5 有效最好保持 R8：`exp_s5_r8_seed42_warmdown095_records0427_caseops_lrzip_1xh100`，no-TTT `1.09647097`，post-TTT `1.08179851`，总字节 `15,924,510`。Phase 5 的真实优化结论是：在单 H100/1h + 当前 fallback 环境下，records 04-27 栈可通过 seed42、真实 `lrzip`、warmdown095、默认 phased TTT 从 R1Q7T `1.08464` 推到 `1.08180`，已经略优于 2026-04-06 记录，但距离 2026-04-27 `~1.061` 仍主要差在训练吞吐/内核与 8 卡训练预算，而不是 TTT 微参、导出微参或 loop 延后。
+
 ### 阶段四收口
 
 第四阶段实际完成了两类工作：

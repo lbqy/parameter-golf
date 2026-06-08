@@ -2,14 +2,70 @@ import base64, collections, copy, fcntl, glob, io, lzma, math, os
 from pathlib import Path
 import random, re, subprocess, sys, time, uuid, numpy as np, sentencepiece as spm, torch, torch.distributed as dist, torch.nn.functional as F
 from torch import Tensor, nn
-from flash_attn_interface import (
-    flash_attn_func as flash_attn_3_func,
-    flash_attn_varlen_func,
-)
+try:
+    from flash_attn_interface import (
+        flash_attn_func as flash_attn_3_func,
+        flash_attn_varlen_func,
+    )
+    FLASH_ATTN_INTERFACE_AVAILABLE = True
+except ModuleNotFoundError:
+    FLASH_ATTN_INTERFACE_AVAILABLE = False
+    def flash_attn_3_func(q, k, v, causal=True):
+        if k.size(2) != q.size(2):
+            group = q.size(2) // k.size(2)
+            k = k.repeat_interleave(group, dim=2)
+            v = v.repeat_interleave(group, dim=2)
+        y = F.scaled_dot_product_attention(
+            q.transpose(1, 2),
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+            is_causal=causal,
+        )
+        return y.transpose(1, 2)
+
+    def flash_attn_3_func_eager_fallback(q, k, v, causal=True):
+        if k.size(2) != q.size(2):
+            group = q.size(2) // k.size(2)
+            k = k.repeat_interleave(group, dim=2)
+            v = v.repeat_interleave(group, dim=2)
+        with torch.backends.cuda.sdp_kernel(
+            enable_flash=True,
+            enable_math=True,
+            enable_mem_efficient=True,
+            enable_cudnn=False,
+        ):
+            y = F.scaled_dot_product_attention(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                is_causal=causal,
+            )
+        return y.transpose(1, 2)
+
+    def flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        causal=True,
+        window_size=(-1, -1),
+    ):
+        del cu_seqlens_k, max_seqlen_q, max_seqlen_k, window_size
+        outputs = []
+        cu = cu_seqlens_q.detach().cpu().tolist()
+        for start, end in zip(cu[:-1], cu[1:]):
+            outputs.append(flash_attn_3_func_eager_fallback(q[start:end][None], k[start:end][None], v[start:end][None], causal=causal)[0])
+        return torch.cat(outputs, dim=0) if outputs else q.new_empty(q.shape)
 from concurrent.futures import ThreadPoolExecutor
 import triton
 import triton.language as tl
-from triton.tools.tensor_descriptor import TensorDescriptor
+try:
+    from triton.tools.tensor_descriptor import TensorDescriptor
+except ModuleNotFoundError:
+    TensorDescriptor = None
 
 
 # ===== Fused softcapped cross-entropy (Triton) — training-only path =====
@@ -752,6 +808,24 @@ class ShuffledSequenceLoader:
         )
 
 
+class FixedSequenceTrainLoader:
+    def __init__(self, h, device):
+        global BOS_ID
+        if BOS_ID is None:
+            BOS_ID = 1
+        self.h = h
+        self.inner = ShuffledSequenceLoader(h, device)
+
+    def next_batch(self, global_tokens, grad_accum_steps):
+        x, y = self.inner.next_batch(global_tokens, grad_accum_steps)
+        return x, y, None, self.h.train_seq_len
+
+
+def make_train_loader(h, device):
+    use_doc_packing = FLASH_ATTN_INTERFACE_AVAILABLE and bool(int(os.environ.get("DOCUMENT_PACKING_ENABLED", "1")))
+    return DocumentPackingLoader(h, device) if use_doc_packing else FixedSequenceTrainLoader(h, device)
+
+
 class RMSNorm(nn.Module):
     def __init__(self, eps=None):
         super().__init__()
@@ -824,6 +898,13 @@ def linear_leaky_relu_square_kernel(
 
 
 def linear_leaky_relu_square(a, b, aux=None):
+    if TensorDescriptor is None:
+        if aux is None:
+            pre = F.linear(a, b)
+            leaky = torch.where(pre > 0, pre, 0.5 * pre)
+            return pre, leaky * leaky
+        grad_post = F.linear(a, b)
+        return grad_post * torch.where(aux > 0, 2.0 * aux, 0.5 * aux)
     M, K = a.shape
     N, K2 = b.shape
     assert K == K2
@@ -2379,18 +2460,40 @@ def _similarity_sort_l1(matrix):
 
 
 def _lrzip_compress(data, tmpdir, label):
+    import brotli
+    import lzma
     inp = os.path.join(tmpdir, f"{label}.bin")
     out = f"{inp}.lrz"
     with open(inp, "wb") as f:
         f.write(data)
-    subprocess.run(["lrzip", "-z", "-L", "9", "-o", out, inp], capture_output=True, check=True)
-    with open(out, "rb") as f:
-        result = f.read()
-    os.remove(inp); os.remove(out)
-    return result
+    try:
+        subprocess.run(["lrzip", "-z", "-L", "9", "-o", out, inp], capture_output=True, check=True)
+        with open(out, "rb") as f:
+            result = f.read()
+        os.remove(inp); os.remove(out)
+        return result
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        try:
+            os.remove(out)
+        except FileNotFoundError:
+            pass
+        br = b"BR11" + brotli.compress(data, quality=11, lgwin=24)
+        xz = b"XZ09" + lzma.compress(data, preset=9 | lzma.PRESET_EXTREME)
+        return xz if len(xz) < len(br) else br
+    finally:
+        try:
+            os.remove(inp)
+        except FileNotFoundError:
+            pass
 
 
 def _lrzip_decompress(data, tmpdir, label):
+    if data.startswith(b"BR11"):
+        import brotli
+        return brotli.decompress(data[4:])
+    if data.startswith(b"XZ09"):
+        import lzma
+        return lzma.decompress(data[4:])
     inp = os.path.join(tmpdir, f"{label}.lrz")
     out = os.path.join(tmpdir, f"{label}.bin")
     with open(inp, "wb") as f:
@@ -3335,10 +3438,14 @@ def train_model(h, device, val_data):
     compiled_forward_logits = torch.compile(
         base_model.forward_logits, dynamic=False, fullgraph=True
     )
+    if not FLASH_ATTN_INTERFACE_AVAILABLE:
+        log("eval_forward_logits:eager fallback because flash_attn_interface is unavailable")
+        compiled_forward_logits = None
     model = compiled_model
     log(f"model_params:{sum(p.numel()for p in base_model.parameters())}")
     optimizers = Optimizers(h, base_model)
-    train_loader = DocumentPackingLoader(h, device)
+    train_loader = make_train_loader(h, device)
+    log(f"train_loader:{type(train_loader).__name__} flash_attn_interface:{FLASH_ATTN_INTERFACE_AVAILABLE}")
     max_wallclock_ms = (
         1e3 * h.max_wallclock_seconds if h.max_wallclock_seconds > 0 else None
     )
@@ -3413,27 +3520,32 @@ def train_model(h, device, val_data):
         num_tokens_local = h.train_batch_tokens // h.world_size
         for blk in base_model.blocks:
             blk.attn.rotary(num_tokens_local, device, torch.bfloat16)
-        cu_bucket_size = train_loader.cu_bucket_size
-        warmup_cu_buckets = tuple(cu_bucket_size * i for i in range(1, 5))
-        warmup_cu_iters = 3
-        x, y, cu_seqlens, _ = train_loader.next_batch(
-            h.train_batch_tokens, h.grad_accum_steps
-        )
-        log(f"warmup_cu_buckets:{','.join(str(b) for b in warmup_cu_buckets)} iters_each:{warmup_cu_iters}")
-        def _run_cu_bucket_warmup():
-            for bucket_len in warmup_cu_buckets:
-                boundaries = list(range(0, x.size(1), max(h.train_seq_len, 1)))
-                if boundaries[-1] != x.size(1):
-                    boundaries.append(x.size(1))
-                cu = torch.full((bucket_len,), x.size(1), dtype=torch.int32, device=device)
-                cu[: len(boundaries)] = torch.tensor(boundaries, dtype=torch.int32, device=device)
-                for _ in range(warmup_cu_iters):
-                    optimizers.zero_grad_all()
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                        wloss = model(x, y, cu_seqlens=cu, max_seqlen=h.train_seq_len)
-                    (wloss / h.grad_accum_steps).backward()
-            optimizers.zero_grad_all()
-        _run_cu_bucket_warmup()
+        if hasattr(train_loader, "cu_bucket_size"):
+            cu_bucket_size = train_loader.cu_bucket_size
+            warmup_cu_buckets = tuple(cu_bucket_size * i for i in range(1, 5))
+            warmup_cu_iters = 3
+            x, y, cu_seqlens, _ = train_loader.next_batch(
+                h.train_batch_tokens, h.grad_accum_steps
+            )
+            log(f"warmup_cu_buckets:{','.join(str(b) for b in warmup_cu_buckets)} iters_each:{warmup_cu_iters}")
+            def _run_cu_bucket_warmup():
+                for bucket_len in warmup_cu_buckets:
+                    boundaries = list(range(0, x.size(1), max(h.train_seq_len, 1)))
+                    if boundaries[-1] != x.size(1):
+                        boundaries.append(x.size(1))
+                    cu = torch.full((bucket_len,), x.size(1), dtype=torch.int32, device=device)
+                    cu[: len(boundaries)] = torch.tensor(boundaries, dtype=torch.int32, device=device)
+                    for _ in range(warmup_cu_iters):
+                        optimizers.zero_grad_all()
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                            wloss = model(x, y, cu_seqlens=cu, max_seqlen=h.train_seq_len)
+                        (wloss / h.grad_accum_steps).backward()
+                optimizers.zero_grad_all()
+            _run_cu_bucket_warmup()
+        else:
+            log("warmup_cu_buckets:skipped fixed_sequence_loader")
+            def _run_cu_bucket_warmup():
+                return None
         if h.num_loops > 0:
             base_model.looping_active = True
             _run_cu_bucket_warmup()
@@ -3464,7 +3576,7 @@ def train_model(h, device, val_data):
         for (opt, state) in zip(optimizers, initial_optimizer_states, strict=True):
             opt.load_state_dict(state)
         optimizers.zero_grad_all()
-        train_loader = DocumentPackingLoader(h, device)
+        train_loader = make_train_loader(h, device)
     _live_state = base_model.state_dict(keep_vars=True)
     ema_state = {
         name: t.detach().float().clone()
@@ -3489,8 +3601,9 @@ def train_model(h, device, val_data):
         if should_validate:
             torch.cuda.synchronize()
             training_time_ms += 1e3 * (time.perf_counter() - t0)
+            eval_model = base_model if compiled_forward_logits is None else model
             val_loss, val_bpb = eval_val(
-                h, device, val_data, model, compiled_forward_logits
+                h, device, val_data, eval_model, compiled_forward_logits
             )
             log(
                 f"{step}/{h.iterations} val_loss: {val_loss:.4f} val_bpb: {val_bpb:.4f}"
@@ -3551,6 +3664,7 @@ def train_model(h, device, val_data):
 
 
 def train_and_eval(h, device):
+    global BOS_ID
     random.seed(h.seed)
     np.random.seed(h.seed)
     torch.manual_seed(h.seed)
@@ -3566,11 +3680,23 @@ def train_and_eval(h, device):
     # pre-existing quantized artifact. Used to test TTT-only improvements
     # (e.g., PR-1767's alpha/warm-start/WD) without retraining.
     ttt_eval_only = os.environ.get("TTT_EVAL_ONLY", "0") == "1"
+    export_only = os.environ.get("EXPORT_ONLY", "0") == "1"
     if ttt_eval_only:
         log("TTT_EVAL_ONLY=1 — skipping training + GPTQ, loading saved artifact for TTT eval")
         log(f"ttt_lora_alpha: {BatchedLinearLoRA._ALPHA}")
         log(f"ttt_warm_start_a: {BatchedLinearLoRA._WARM_START_A}")
         log(f"ttt_weight_decay: {h.ttt_weight_decay}")
+    elif export_only:
+        log(f"EXPORT_ONLY=1 — loading {h.model_path} and running serialize/GPTQ")
+        if BOS_ID is None:
+            BOS_ID = 1
+        base_model = GPT(h).to(device).bfloat16()
+        restore_fp32_params(base_model)
+        state = torch.load(h.model_path, map_location=device)
+        base_model.load_state_dict(state, strict=True)
+        serialize(h, base_model, Path(__file__).read_text(encoding="utf-8"))
+        if h.distributed:
+            dist.barrier()
     else:
         base_model, compiled_model, compiled_forward_logits = train_model(
             h, device, val_data
@@ -3582,7 +3708,7 @@ def train_and_eval(h, device):
             h,
             device,
             val_data,
-            compiled_model,
+            base_model if compiled_forward_logits is None else compiled_model,
             compiled_forward_logits,
         )
         if os.environ.get("PREQUANT_ONLY", "0") == "1":
@@ -3595,10 +3721,15 @@ def train_and_eval(h, device):
     if h.num_loops > 0:
         eval_model.looping_active = True
     if not ttt_eval_only:
-        compiled_model = torch.compile(eval_model, dynamic=False, fullgraph=True)
-        compiled_forward_logits = torch.compile(
-            eval_model.forward_logits, dynamic=False, fullgraph=True
-        )
+        if FLASH_ATTN_INTERFACE_AVAILABLE:
+            compiled_model = torch.compile(eval_model, dynamic=False, fullgraph=True)
+            compiled_forward_logits = torch.compile(
+                eval_model.forward_logits, dynamic=False, fullgraph=True
+            )
+        else:
+            log("quant_eval_forward_logits:eager fallback because flash_attn_interface is unavailable")
+            compiled_model = eval_model
+            compiled_forward_logits = None
         timed_eval(
             "diagnostic quantized",
             eval_val,
@@ -3646,7 +3777,6 @@ def train_and_eval(h, device):
 
         fwd_ttt_compiled = _fwd_ttt
         log(f"ttt_lora:warming up compile (random tokens, no val data)")
-        global BOS_ID
         if BOS_ID is None:
             BOS_ID = 1
         t_warmup = time.perf_counter()

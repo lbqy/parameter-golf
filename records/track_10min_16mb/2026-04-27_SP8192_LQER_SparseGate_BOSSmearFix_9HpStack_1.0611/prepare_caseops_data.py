@@ -117,6 +117,7 @@ def main() -> None:
     ap.add_argument("--out",  required=True, type=pathlib.Path, help="Output datasets dir")
     ap.add_argument("--sp",   required=True, type=pathlib.Path, help="Path to CaseOps SP model")
     ap.add_argument("--val-docs", type=int, default=10_000, help="Validation docs count")
+    ap.add_argument("--train-shards", type=int, default=0, help="Stop after writing this many full train shards; 0 means all docs")
     args = ap.parse_args()
 
     sp = spm.SentencePieceProcessor(model_file=str(args.sp))
@@ -156,6 +157,10 @@ def main() -> None:
                              np.array(train_buf[:SHARD_TOKENS], dtype=np.uint16))
                 train_buf = train_buf[SHARD_TOKENS:]
                 train_written += 1
+                if args.train_shards > 0 and train_written >= args.train_shards:
+                    print(f"stopping after requested train_shards={args.train_shards}", flush=True)
+                    train_buf = []
+                    break
         n_docs += 1
         if n_docs % 10_000 == 0:
             print(f"  processed {n_docs} docs  train_shards={train_written}  val_shards={val_written}", flush=True)

@@ -8,15 +8,16 @@
 
 | 项目 | 值 |
 | --- | --- |
-| RUN_ID | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` |
-| Artifact | `results/experiments/exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export/final_model.gptq.ptz` |
-| Roundtrip BPB | **1.16522320** |
-| 总字节 | **15,755,553** |
-| 训练 checkpoint | `results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100/final_model.pt` |
-| Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export`：1.16735413 / 15,753,494 bytes |
+| RUN_ID | `exp_s5_r8_seed42_warmdown095_records0427_caseops_lrzip_1xh100` |
+| Artifact | `results/experiments/exp_s5_r8_seed42_warmdown095_records0427_caseops_lrzip_1xh100/final_model.int6.ptz` |
+| Roundtrip BPB | **1.09647097** |
+| Post-TTT BPB | **1.08179851** |
+| 总字节 | **15,924,510** |
+| 训练 checkpoint | `results/experiments/exp_s5_r8_seed42_warmdown095_records0427_caseops_lrzip_1xh100/final_model.pt` |
+| Phase 4 对照 | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export`：1.16522320 / 15,755,553 bytes |
 | records 参考 | `2026-04-27...1.0611`，3-seed mean 约 1.06108 |
 
-优化路线已经从“找一个质量好的训练基座”推进到“在 16 MB 内最大化可保留质量”。第三阶段的 Q43 是根脚本局部最优：SP8192 + Seq4096 训练基座，GPTQ int6/embed8 + LQER 压缩，训练侧叠加 `QK_GAIN_INIT=5.0`、更适合量化的 hparam stack、`TIED_EMBED_LR=0.04`、`MUON_MOMENTUM=0.97`，并在训练后 30% 开启 L3-L5 轻量递归。第四阶段在此基础上加入 SparseGate + LeakyReLU^2 + Polar NS，并通过 `calib32 + GPTQ_ERROR_SCALE=0.975` 导出刷新到 1.16522320；相对 Q43 只改善约 0.00213 BPB，距离 records mean 仍有约 0.10414 BPB 的巨大差距。
+优化路线已经从“找一个质量好的训练基座”推进到“复现并改造 records 级系统栈”。第三阶段的 Q43 是根脚本局部最优；第四阶段通过 SparseGate + LeakyReLU^2 + Polar NS 将根脚本 best 推到 1.16522320；第五阶段补齐 CaseOps byte-sidecar 评估、records 2026-04-27 advanced stack fallback、真实外部 `lrzip` 和 legal phased TTT，最终由 seed42 + `WARMDOWN_FRAC=0.95` 的 R8 刷新到 post-TTT 1.08179851。相对 Phase 4 best，Phase 5 下降 `0.08342469 BPB`，已经略优于 2026-04-06 记录，但距离 2026-04-27 mean 仍有约 `0.02072 BPB`。
 
 ## 约束与核心矛盾
 
@@ -99,7 +100,7 @@
 | Q43 对照 | `exp_s3_q43_r15_clip_top4_rank4_export` | 1.16735413 | 15,753,494 | 第三阶段最佳 |
 | SparseGate + LeakyReLU^2 + Polar NS | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_1xh100` | 1.16622225 | 15,756,176 | 首次超过 Q43，但原并行 cwd 覆盖 checkpoint |
 | checkpoint-safe rerun | `exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100` | 1.16529603 | 15,755,792 | 可靠 checkpoint，复现并超过原 run |
-| final export | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` | **1.16522320** | **15,755,553** | 当前本地最佳 |
+| final export | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` | **1.16522320** | **15,755,553** | 阶段四最佳 |
 
 阶段四的净收益约为 `1.16735413 - 1.16522320 = 0.00213093 BPB`。这说明 gate/activation/optimizer 组合确实有信号，但这个信号只相当于 SOTA gap 的约 2%，不能改变整体落后格局。
 
@@ -114,7 +115,7 @@
 | SmearGate | 最好 `S4-G2G1W24` roundtrip 1.17304535 | 单独接入 Q43 不成立，不代表 records 组合无效 |
 | SparseGate 单项 | `S4-G3` roundtrip 1.16893548 | 单项仍负于 Q43 |
 | SparseGate + Polar NS | `S4-G3K3` roundtrip 1.16774440 | 接近 Q43 但不够 |
-| SparseGate + LeakyReLU^2 + Polar NS | QS28 roundtrip 1.16522320 | 当前唯一有效组合，但收益有限 |
+| SparseGate + LeakyReLU^2 + Polar NS | QS28 roundtrip 1.16522320 | 阶段四唯一有效组合，但收益有限 |
 | export-only 细扫 | QS26-QS30 均在 1.16522 附近 | 已进入约 `1e-5 BPB` 级平台期 |
 
 还有一个工程复盘：第一次 SparseGate 完整批次从项目根目录并行启动，`final_model.pt` 被多个训练进程覆盖，导致根目录 checkpoint 不能可靠归属到最佳 run。后续通过 run-dir cwd 的 checkpoint-safe rerun 修正，并以 `results/experiments/exp_s4_g3g1k3_sparse_w12_leaky_polarns_q43_rerun_ckpt_1xh100/final_model.pt` 作为唯一可信导出基座。
@@ -138,38 +139,59 @@
 | BOS sidecar | 通过 | 16 个验证 doc 的 BOS byte 全为 0 |
 | 根脚本 loader | 通过 | 极小模型 1 step + int8 roundtrip 可读取 CaseOps token shard |
 
-这个补充改变了阶段四的问题定位：CaseOps 已不再是“缺 raw docs 无法开始”，而是“raw docs 和 prepare smoke 可用，但完整 token shards 尚未生成，根脚本尚未按 `fineweb_val_bytes_*.bin` 计算原始 byte BPB”。当前 `train_gpt.py` smoke 日志仍是 `val_bpb:enabled tokenizer_kind=sentencepiece`，还没有出现 `val_bpb:byte_sidecar:enabled`。因此，CaseOps 还不能进入完整 1h 训练基线；下一步必须先完成 full prepare 和 byte-sidecar BPB 接入。
+这个补充改变了阶段四的问题定位：CaseOps 已不再是“缺 raw docs 无法开始”，而是“raw docs 和 prepare smoke 可用，但完整 token shards 尚未生成，根脚本尚未按 `fineweb_val_bytes_*.bin` 计算原始 byte BPB”。当前 `train_gpt.py` smoke 日志仍是 `val_bpb:enabled tokenizer_kind=sentencepiece`，还没有出现 `val_bpb:byte_sidecar:enabled`。因此，CaseOps 在阶段四末尾还不能进入完整 1h 训练基线；第五阶段必须先完成 full prepare 和 byte-sidecar BPB 接入。
+
+## 阶段五：CaseOps 合规链路与 records 主线
+
+第五阶段的目标从“继续榨 QS28”切换为“让 records 04-27 主线在 1xH100/1h 环境下真实跑通并优化”。这一步先补齐数据和评估闸门：CaseOps full prepare 生成 80 个 train shards、1 个 val shard、1 个 val byte sidecar shard；验证集 token 数为 9,662,502，byte sidecar 合计 29,950,979 bytes，BOS 数 10,000，bad BOS bytes 为 0。根目录 `train_gpt.py` 同时修复了 `fineweb_val_*.bin` 误匹配 `fineweb_val_bytes_*.bin` 的 glob 问题，并在 sidecar 存在时按 shifted `y` target 对齐 byte count 计算 BPB，日志已出现 `val_bpb:byte_sidecar:enabled`。
+
+第一批 root CaseOps 结果是负信号：C5 的 CaseOps + QS28 结构为 `1.17380957`，明显差于 Phase 4 QS28 的 `1.16522320`；C4/C4b/C5b/C6 也没有证明 root 静态 CaseOps 可直接获益。普通 SP8192 root 线仍能挤出小幅收益，O8 达到 `1.16357912`，O4 的 MLP3 甚至到 `1.15317521`，但 O4 总字节为 `16,806,331`，超过 16 MB；后续 P1-P4 容量修复没有产出有效更优结果。因此 root 线从主线降级为备份。
+
+真正的转折来自 records 2026-04-27 advanced stack。当前环境缺 `flash_attn_interface`、`triton.tools.tensor_descriptor` 和部分 varlen compile 条件，阶段五先补了 torch SDPA fallback、eager MLP fallback、无 FA3 时固定序列 loader、BOS 初始化和 cu bucket warmup 跳过逻辑。R1 完成训练后卡在缺少 `lrzip`；安装真实外部 `lrzip` 后，R1Q7 将 embed7/top3 artifact 压到 `15,925,658` bytes，no-TTT BPB 为 `1.09951341`，首次形成有效 near-1.10 结果。R1Q7T 的 legal phased TTT 进一步降到 `1.08464351`，证明 TTT 收益约 `0.0149 BPB`，且不是非法重评分或 fallback artifact 的偶然结果。
+
+随后第五阶段重点转向训练起点，而不是继续扫 TTT 微参。T3-T14 只把 R1Q7T 从 `1.08464351` 微调到 T12 的 `1.08458960`，收益约 `5e-5 BPB`；R2/R3/R9 显示 seed42 明显更好，其中 R2 为 `1.09686294 -> 1.08218120`。最终 R8 在 seed42 上把 `WARMDOWN_FRAC` 调到 0.95，得到 no-TTT `1.09647097`、post-TTT `1.08179851`、总字节 `15,924,510`，成为当前有效最好。R12/R13/R20 的 warmdown 0.90/0.98/0.94、R14/R15 的跨 seed、R18/R19 的 min_lr、R8Q1-Q5 的导出微扫均未刷新 R8。
+
+| 分支 | 最佳结果 | no-TTT / roundtrip | post-TTT | bytes | 结论 |
+| --- | --- | ---: | ---: | ---: | --- |
+| Phase 4 root QS28 | `exp_s4_qs28_g3g1k3_rerun_calib32_err0975_export` | 1.16522320 | | 15,755,553 | 旧本地最佳 |
+| Phase 5 root QS28 | S5-O8 | 1.16357912 | | 15,761,143 | 有小收益，但已非主线 |
+| records R1Q7 | S5-R1Q7/T | 1.09951341 | 1.08464351 | 15,925,658 | 真实 `lrzip` 让 records artifact 合规 |
+| records seed42 | S5-R2 | 1.09686294 | 1.08218120 | 15,925,323 | seed/training 质量是主要杠杆 |
+| records warmdown095 | S5-R8 | **1.09647097** | **1.08179851** | **15,924,510** | 当前最终候选 |
+
+第五阶段的真实结论是：在单 H100/1h + 当前 fallback 环境下，records 04-27 栈已经大幅优于 root QS28；有效收益来自 CaseOps 合规链路、records 结构栈、真实 `lrzip`、seed42、warmdown095 和默认 phased TTT 的组合。继续做 TTT 小扫、导出小扫、root CaseOps 静态训练或延后 loop 已经进入低收益区。
 
 ## 当前最优组合的解释
 
-当前最佳 QS28 是 Q43 训练栈上继续叠加 SparseGate + LeakyReLU^2 + Polar NS 后，再做一轮窄幅导出细扫得到的结果。它可以理解为四个层次的配合：
+当前最佳 R8 不是 QS28 的局部导出结果，而是 records 04-27 advanced stack 在本地 fallback 环境下跑通后的真实优化结果。它可以理解为四个层次的配合：
 
-1. `QK_GAIN_INIT=5.0` 和 clip stack 先把基础训练动态调到更适合 SP8192/Seq4096 的区域。
-2. `TIED_EMBED_LR=0.04` 重点照顾大词表 embedding/head 相关参数，这类参数对 BPB 和量化都敏感。
-3. `MUON_MOMENTUM=0.97` 加 L3-L5 轻量递归提高有效建模能力，但只在训练后 30% 开启，避免全程递归拖慢太多 step 或放大早期不稳定。
-4. SparseGate + LeakyReLU^2 + Polar NS 在训练质量上进一步降低 pre BPB；最终通过 `GPTQ_CALIBRATION_BATCHES=32` 和 `GPTQ_ERROR_SCALE=0.975` 保住其中一部分收益。
+1. CaseOps + byte sidecar 先改变评估和数据表示，让 BPB 按原始 byte 对齐，并保留 doc/BOS 信息供 records stack 和 TTT 使用。
+2. records 04-27 结构栈提供主要质量跃迁，包括更深/更宽的 advanced 配置、gate/smear/quant gate、recurrence、parallel decoder/lane、LQER 和 int7 embedding 等；本地因缺 FA3/fused 组件走了 SDPA/eager/fixed-loader fallback。
+3. 真实外部 `lrzip` 是合规关键。fallback brotli/lzma 压缩下 embed7/top3 artifact 仍超过 16 MB；`lrzip` 将同一权重压到 15,925,658 bytes，并保留 `1.09951341` 的 no-TTT 质量。
+4. seed42 + `WARMDOWN_FRAC=0.95` 改善了单卡低步数训练起点，R8 no-TTT 从 R1Q7 的 `1.09951341` 降到 `1.09647097`；默认 phased TTT 再提供约 `0.01467 BPB`，到最终 `1.08179851`。
 
-导出侧仍选择 GPTQ int6/embed8 + LQER top4 rank4，是因为 matrix int6 提供主要容量节省，embed8 避免大词表质量断崖，LQER 用少量字节修正最大量化误差张量。QS28 之后的 export-only 收益已经进入 `1e-5 BPB` 级别，说明当前瓶颈不再是普通 GPTQ/LQER 参数细扫。
+因此当前瓶颈已经不在普通 GPTQ/LQER 微参。R8Q1-Q5 的 error scale、calib batch、top-k 导出小扫均退化；R8T12 也说明 R1Q7 上的 TTT 近邻设置迁移到 R8 后不再改善。主杠杆是更好的训练吞吐/内核、records 栈完整度和可能的多 seed/多预算策略。
 
 ## 为什么距离 SOTA 仍然较远
 
-当前结果是根脚本内的强局部最优，但距离 records 级 SOTA 仍有约 0.10414 BPB 差距。这个 gap 太大，不可能靠 Q43/QS28 周围继续扫 `top_k`、`rank`、`calib`、`error_scale` 或单个小结构开关关闭。更本质的问题是：我们仍在优化一个“普通 token-stream 静态模型”，而 records 级方案很可能已经把数据表示、推理时自适应、结构栈和压缩布局一起改了。
+当前结果已经不是根脚本局部最优，而是本地 records fallback 主线的有效结果。距离 2026-04-27 records mean 约 `1.06108` 仍有 `1.08179851 - 1.06108 ~= 0.02072 BPB`。这个 gap 已经比 Phase 4 小很多，但仍不是靠 export-only 或 TTT 微扫能关闭的量级。
 
-1. 数据链路缺陷仍是第一层硬伤，但状态已经从“缺 raw docs”推进到“raw docs 和小样本 prepare smoke 可用”。当前仍缺完整 CaseOps shards、根脚本 byte-sidecar BPB、doc boundary eval/TTT 接入。records 路线不是单纯让同一个 token 分布训练得更好，而是降低待预测序列的有效熵，并把 byte 级信息放进合规 sidecar 中。这个收益通常是架构和超参补不回来的。
-2. TTT 还没有真正实现。第三阶段失败的 `ttt_eval.py` 只是 lm-head LoRA、全局连续 token block 更新，不能代表 records 中的 legal/phased TTT。真正可能有收益的版本需要 doc-boundary、score-before-update、单 pass 无 rescoring、multi-phase global SGD、Q/K/V/O/MLP/head adapters、per-doc reset 或 warm-start，并且 forward path 必须镜像训练/导出模型。我们现在缺的是完整机制，不是差一个 LoRA rank。
-3. 结构栈是零散移植，不是共同设计。QS28 只接入了 SparseGate + LeakyReLU^2 + Polar NS；缺 parallel residual / decoder lane、XSA、11L/MLP4x、QuantGate/SmearGate 的正确组合、doc-safe gate 路由等 records 常见组件。单项 ablation 负收益不意外，因为这些组件可能依赖数据链路、TTT 和压缩容量共同适配。
-4. 压缩链路仍在“保质量”，没有“创造容量”。GPTQ/LQER/brotli 已经能把当前模型压进 16 MB，但没有 per-group layout、simsort、lrzip、权重重排、按层 bit allocation 或面向 gate/lane/adapters 的专门编码。没有新的压缩余量，就很难同时放入 embed7/更大结构/adapter/LQER 修正并维持 roundtrip。
-5. 1h 静态训练的有效计算量不够。当前 H100 1h 约 5k optimizer steps，靠静态小模型一次性学完所有分布。records 级方案很可能通过 CaseOps 降低分布难度，通过 TTT 在验证/测试文档上追加合规自适应计算，通过结构栈提高参数效率。我们主要还在做离线训练内的局部优化。
-6. 搜索方式仍是局部爬山。第四阶段大多数实验是“Q43 + 一个开关或两个开关”，这对发现小收益有效，但不适合复现 records 级组合。SOTA gap 是系统性 gap，不是单开关 gap。
+1. no-TTT 起点仍偏高。R8 no-TTT 为 `1.09647097`，而 04-27 records post-quant 约在 `1.073-1.075` 区间；R8 的 TTT 收益约 `0.01467 BPB`，量级已经接近 records，因此主要差距在训练后 artifact 本身。
+2. 当前 records 路线运行在 fallback 环境。缺 FA3、TensorDescriptor/fused MLP 和完整 varlen compile path 后，训练退到 fixed-sequence/SDPA/eager fallback；R8 只有约 3202 steps，吞吐约 708k tok/s。04-27 参考在 8xH100/600s 环境下约 4931 steps、约 121.7ms/step，训练预算和 kernel 条件都更强。
+3. 结构栈虽然跑通，但不是完整高吞吐形态。fallback 让 doc-boundary/varlen 优势、融合 MLP 和部分 layout 优化不能完全发挥；这会同时影响训练步数、batch 组成和后段收敛质量。
+4. TTT 近邻已经平台。R1Q7 上 T3-T14 最多只改善约 `5e-5 BPB`，R8T12 反而略差于默认 TTT；继续扫 prefix docs、phase 数、global lr 的预期收益很低。
+5. 压缩不是当前主瓶颈，但仍是 hard constraint。真实 `lrzip` 已经让 embed7/top3 合规；R8Q1-Q5 说明当前量化参数附近没有可吃的大收益。未来若想放更大结构或 adapter，仍需要更强 packing/per-group/layout，而不是现有 LQER top-k 微调。
 
-所以，本项目当前最本质的缺陷不是 FlashAttention、RoPE、ReLU^2 或某个 kernel 是否还差一点，而是缺少 records 方案里改变问题形态的三件事：数据/sidecar、合法 TTT、结构/压缩联合设计。内核优化仍有价值，但它主要买训练步数或让更复杂结构跑满 1h；如果目标分布和推理机制不变，单靠 kernel 很难把 0.104 BPB 的 gap 打穿。
+所以，Phase 5 后的核心判断变了：项目已经补齐了数据/sidecar、合法 TTT 和 records 结构主线，不再是“缺机制”；剩余 gap 更像是单卡 1h fallback 训练质量与 records 参考环境之间的计算/内核/吞吐差距。下一轮应优先让同一 records 栈跑得更接近原始高吞吐条件，而不是继续围绕 R8 artifact 做小半径微调。
 
 ## 下一步建议
 
-短期不建议继续在 QS28 周围做大量 top-k、rank、calibration、error-scale 微扫，因为导出侧已经出现平台期。若目标是逼近 SOTA，第五阶段需要停止以单开关 ablation 为主线，改成三条高杠杆路径：
+短期应把 R8 固化为当前候选，并停止低收益分支：root CaseOps 静态训练、QS28/export-only 大量微扫、R1Q7/R8 TTT 近邻、延后 loop、batch917k、min_lr 抬高都已经有明确负结果。
 
-1. CaseOps/data sidecar 合规链路：raw docs 已恢复，下一步是完整生成 CaseOps train/val/val_bytes shards，修改 `train_gpt.py` 读取 `fineweb_val_bytes_*.bin`，验证 `val_bpb:byte_sidecar:enabled`、BOS sidecar 和 doc boundary 合规，再做短训 smoke。
-2. 真正的 legal/phased TTT：不要沿用 lm-head MVP，改为按 records 设计 adapter 位置、phase、score-before-update、单 pass、无 rescoring、per-doc reset/warm-start 和更新预算；先 eval-only 接到 Q43/QS28 artifact 上，看是否至少有 `-0.002 BPB`。
-3. 结构/压缩联合设计：parallel residual / decoder lane、11L/MLP4x、XSA、gate 类结构必须和 per-group compression、simsort/lrzip、专门 bit allocation 一起设计，避免 pre BPB 改善继续被 roundtrip 吃掉。
+1. 固化 R8 复现链路：记录真实外部 `lrzip` 依赖、CaseOps shards/sidecar、records fallback 开关、默认 TTT 配置和最终 artifact bytes，确保最终提交脚本能稳定复现 `1.08179851`。
+2. 优先解决 FA3/fused MLP/TensorDescriptor 环境 blocker。目标不是单纯加速，而是让 records 04-27 栈恢复 varlen/doc-boundary 高吞吐训练形态；这是目前最可能继续降低 no-TTT 起点的方向。
+3. 环境修好后重跑最小矩阵：seed42 + `WARMDOWN_FRAC=0.95` 作为第一优先级，再补 seed0/1234 或一个 warmdown 近邻；判断是否能把 no-TTT 从 `1.09647` 推向 records 参考的 `1.073-1.075`。
+4. 若 kernel 环境短期不可解，备选是 root-native doc-boundary 高吞吐实现：尽量保留 CaseOps sidecar、records TTT 合规语义和 R8 的 warmdown/seed 经验，但减少 fallback 带来的 compile/loader 损失。
+5. 只有在出现更强 no-TTT artifact 后，再重启 TTT 或 export 小扫；否则这些微扫大概率只贡献 `1e-5` 到 `1e-4 BPB`。
 
-当前 QS28 是一个清晰但也令人不舒服的里程碑：它证明 Q43 主线仍能被 SparseGate + LeakyReLU^2 + Polar NS 小幅推进；同时也说明，继续沿着“静态训练 + 普通 token stream + 导出微扫”的路线，只会得到 `1e-3` 到 `1e-5` 级收益，无法逼近 records 级 SOTA。下一轮的成败点必须转向数据链路、推理时自适应和结构/压缩联合设计。
+当前里程碑比 Phase 4 清楚得多：项目已经从 `1.16522` 跳到 `1.08180`，证明 records 主线在单卡 1h 约束下也能真实工作；下一步的胜负手不是“再找一个小开关”，而是把同一主线的训练质量和运行环境继续往 04-27 reference 靠近。

@@ -270,8 +270,24 @@ def build_sentencepiece_luts(
     )
 
 
+def validation_token_files(pattern: str) -> list[Path]:
+    return [
+        Path(p)
+        for p in sorted(glob.glob(pattern))
+        if not Path(p).name.startswith("fineweb_val_bytes_")
+    ]
+
+
+def validation_byte_sidecar_files(pattern: str) -> list[Path]:
+    if "fineweb_val_*.bin" in pattern:
+        sidecar_pattern = pattern.replace("fineweb_val_*.bin", "fineweb_val_bytes_*.bin")
+    else:
+        sidecar_pattern = str(Path(pattern).parent / "fineweb_val_bytes_*.bin")
+    return [Path(p) for p in sorted(glob.glob(sidecar_pattern))]
+
+
 def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
-    files = [Path(p) for p in sorted(glob.glob(pattern))]
+    files = validation_token_files(pattern)
     if not files:
         raise FileNotFoundError(f"No files found for pattern: {pattern}")
     # The export pipeline writes the fixed first-50k-doc validation set to fineweb_val_*.
@@ -280,6 +296,19 @@ def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
     if usable <= 0:
         raise ValueError(f"Validation split is too short for TRAIN_SEQ_LEN={seq_len}")
     return tokens[: usable + 1]
+
+
+def load_validation_byte_sidecar(pattern: str, expected_numel: int) -> tuple[Tensor | None, list[Path]]:
+    files = validation_byte_sidecar_files(pattern)
+    if not files:
+        return None, []
+    byte_counts = torch.cat([load_data_shard(file) for file in files]).contiguous()
+    if byte_counts.numel() < expected_numel:
+        raise ValueError(
+            f"Validation byte sidecar is shorter than validation tokens: "
+            f"bytes={byte_counts.numel()} tokens={expected_numel}"
+        )
+    return byte_counts[:expected_numel], files
 
 
 def eval_val(
@@ -293,6 +322,7 @@ def eval_val(
     base_bytes_lut: Tensor,
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
+    val_byte_sidecar: Tensor | None = None,
 ) -> tuple[float, float]:
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
@@ -328,8 +358,12 @@ def eval_val(
             val_token_count += batch_token_count
             prev_ids = x.reshape(-1)
             tgt_ids = y.reshape(-1)
-            token_bytes = base_bytes_lut[tgt_ids].to(dtype=torch.int16)
-            token_bytes += (has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
+            if val_byte_sidecar is None:
+                token_bytes = base_bytes_lut[tgt_ids].to(dtype=torch.int16)
+                token_bytes += (has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
+            else:
+                local_bytes = val_byte_sidecar[raw_start:raw_end].to(device=device, dtype=torch.int32, non_blocking=True)
+                token_bytes = local_bytes[1:].reshape(-1)
             val_byte_count += token_bytes.to(torch.float64).sum()
 
     if dist.is_available() and dist.is_initialized():
@@ -1138,16 +1172,33 @@ def main() -> None:
     dataset_dir = Path(args.data_path).resolve()
     actual_train_files = len(list(dataset_dir.glob("fineweb_train_*.bin")))
     val_tokens = load_validation_tokens(args.val_files, args.train_seq_len)
+    val_byte_sidecar, val_byte_files = load_validation_byte_sidecar(args.val_files, val_tokens.numel())
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
     )
-    log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
+    if val_byte_sidecar is None:
+        log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
+    else:
+        bos_mask = val_tokens == args.bos_id
+        bos_count = int(bos_mask.sum().item())
+        sidecar_i32 = val_byte_sidecar.to(torch.int32)
+        bad_bos_bytes = int((sidecar_i32[bos_mask] != 0).sum().item()) if bos_count else 0
+        log0(
+            f"val_bpb:byte_sidecar:enabled files:{len(val_byte_files)} "
+            f"bytes_sum:{int(sidecar_i32.to(torch.int64).sum().item())} "
+            f"bos_count:{bos_count} bad_bos_bytes:{bad_bos_bytes}"
+        )
+        if bad_bos_bytes:
+            raise ValueError(f"Validation byte sidecar has {bad_bos_bytes} BOS positions with nonzero bytes")
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(
         f"loader_mode:{args.loader_mode} coprime_file_stride:{args.coprime_file_stride} "
         f"coprime_token_stride:{args.coprime_token_stride}"
     )
-    log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
+    log0(
+        f"val_loader:shards pattern={args.val_files} token_files:{len(validation_token_files(args.val_files))} "
+        f"tokens:{val_tokens.numel() - 1}"
+    )
 
     # -----------------------------
     # MODEL + OPTIMIZER SETUP
@@ -1403,6 +1454,7 @@ def main() -> None:
                 base_bytes_lut,
                 has_leading_space_lut,
                 is_boundary_token_lut,
+                val_byte_sidecar,
             )
             log0(
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
@@ -1629,6 +1681,7 @@ def main() -> None:
         base_bytes_lut,
         has_leading_space_lut,
         is_boundary_token_lut,
+        val_byte_sidecar,
     )
     torch.cuda.synchronize()
     log0(
