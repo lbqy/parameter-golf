@@ -102,6 +102,136 @@ raw docs
 
 下面逐个解释。
 
+### 3.1 `records stack` 到底是什么
+
+我在前文多次写到 `records stack`，这不是一个正式算法名，也不是单个开关。它的意思是：`records/track_10min_16mb/` 里历史高分提交积累下来的一整套“组合拳”。其中我们 Phase 5 主要参考的是：
+
+```text
+records/track_10min_16mb/
+  2026-04-27_SP8192_LQER_SparseGate_BOSSmearFix_9HpStack_1.0611/
+```
+
+这个 04-27 record 的官方式描述是：
+
+```text
+11L XSA + LQER + SparseAttnGate + SmearGate (BOS-fixed)
++ PolarNS Muon + 9-hparam stack
+```
+
+如果翻译成人话，它不是“用了 SparseGate 所以强”，也不是“用了 TTT 所以强”，而是把下面六层东西一起调过：
+
+| 层 | 包含什么 | 解决什么问题 |
+| --- | --- | --- |
+| 数据层 | SP8192 CaseOps tokenizer、lossless caps transform、byte sidecar、BOS/doc boundary | 让 BPB 按原始 byte 合规计算，并给 doc-level TTT 提供边界。 |
+| 模型结构层 | 11 层 512d、8 heads/4 KV GQA、MLP 4x、LeakyReLU²、XSA all layers、U-Net skip、partial RoPE/YaRN、parallel decoder lane、depth recurrence | 用更高参数效率和更多有效计算降低 pre-quant BPB。 |
+| gate/信息流层 | Sparse attention gate、SmearGate、BOS leak fix、skip gates、parallel lane mix | 控制信息在哪些 head/通道/位置之间流动，避免容量浪费和跨文档泄漏。 |
+| 训练动态层 | Polar-Express Muon、Adam hparam stack、warmdown、min_lr、grad clip、EMA、QK gain | 让 10min/1h 的短训更快更稳地收敛。 |
+| 导出压缩层 | GPTQ int6、int7 embedding、int8 gate、LQER asymmetric int4 rank4 top3、per-group row reorder、`lrzip`/brotli | 把更强模型压进 16 MB，同时尽量保住 roundtrip BPB。 |
+| 评估自适应层 | legal phased TTT、doc-boundary score-before-update、LoRA adapters、multi-phase global SGD | 在测试/验证阶段利用当前文档已看过的部分继续适配，降低 post-TTT BPB。 |
+
+这就是 `stack` 这个词的含义：每一层单独看都可能只有小收益，甚至单独移植会变差；但它们一起设计时，训练分布、模型结构、量化误差、压缩布局和 TTT 行为会互相适配。
+
+#### 3.1.1 为什么不能把 records stack 理解成“records 模型结构”
+
+因为 04-27 record 里至少有三类东西不属于模型结构：
+
+1. CaseOps/byte sidecar 是数据与评估链路。
+2. GPTQ/LQER/`lrzip` 是导出压缩链路。
+3. phased TTT 是评估阶段的在线自适应。
+
+如果只把其中一个结构组件搬进 root 脚本，比如只开 SparseGate 或只换 LeakyReLU²，通常不会得到 record 级收益。Phase 4 已经验证过这一点：SparseGate 单项、SmearGate 单项、Polar NS 单项都没有超过 Q43；只有 SparseGate + LeakyReLU² + Polar NS 的小组合带来 `~0.00213 BPB` 的局部收益。
+
+#### 3.1.2 04-27 records stack 的关键组件逐层解释
+
+数据层：
+
+- `SP8192 CaseOps tokenizer`：仍是 8192 词表大 tokenizer，但配合 CaseOps 的 lossless caps 预处理，让文本大小写/特殊形式更适合挑战。
+- `byte sidecar`：每个 val token 对应原始 byte 数，BPB 直接按 sidecar 求分母。
+- `BOS/doc boundary`：知道文档从哪里开始，TTT 和 SmearGate 都不能跨文档泄漏信息。
+
+模型层：
+
+- `11L 512d`：比 root 9 层更深，但宽度仍控制在 512。
+- `MLP 4x + LeakyReLU²`：增大 FFN 容量，同时用 records 里验证过的激活。
+- `XSA all layers`：一种 extra/extended skip attention 风格的结构增强，核心直觉是让每层能更好利用早期表示，不只是线性堆 block。
+- `U-Net skips`：前半层的表示跳连到后半层，像 U-Net 一样保留浅层信息。
+- `parallel decoder lane`：后面几层拆成两个并行 lane，attention/MLP 输出用可学习系数混合，增加表示路径。
+- `depth recurrence / loop layers 3-5`：训练到一定进度后，把部分层重复执行，增加有效深度但不增加对应权重存储。
+
+gate/信息流层：
+
+- `Sparse attention gate`：对 attention head 输出做窄门控，用很少参数控制哪些 head 输出更该通过。
+- `SmearGate`：让当前位置表示可以混入前一个 token 的少量信息，像一种可学习的局部位置平滑。
+- `BOS-fixed SmearGate`：关键合规修复。普通 SmearGate 如果在 packed stream 中直接用前一个 token，会把上一个文档的最后 token 混进下一个文档 BOS 后的位置，形成跨文档泄漏；04-27 record 在 BOS 位置用 mask 阻断这个路径。
+
+训练动态层：
+
+- `Polar-Express Muon`：矩阵参数用更强的 Muon/NS 更新，改善短训稳定性。
+- `QK_GAIN_INIT=5.0`：让 attention 初始尺度更适合这个小模型。
+- `warmdown/min_lr/grad clip/EMA`：控制后段收敛、梯度稳定和最终权重平滑。
+- `9-hparam stack`：04-27 README 里列了 9 个经 greedy forward-selection 验证的超参，包括 clip sigmas、`BETA2=0.99`、TTT beta/weight decay/rank、SparseGate scale、TTT prefix docs、warmdown frac 等。
+
+导出压缩层：
+
+- `GPTQ int6`：大矩阵 6 bit Hessian-aware 量化。
+- `int7 embedding`：embedding 比普通矩阵更敏感，所以保留 7 bit。
+- `LQER asymmetric int4 rank4 top3`：挑量化误差最大的 3 个张量，用低秩 int4 因子补回来。
+- `per-group compression`：把相似类型的量化权重分组，热点 2D tensor 做行相似排序，再用 `lrzip` ZPAQ 压缩；剩余部分用 brotli。
+
+TTT 层：
+
+- `phased TTT`：把测试时适配分成多个 phase。
+- `prefix docs`：先用前若干文档或文档前缀做合法更新。
+- `LoRA adapters`：不是直接大改全部模型权重，而是在 Q/K/V/O/MLP/head 等位置用轻量可训练 adapter。
+- `score-before-update`：先评分当前 token/chunk，再用它更新，避免偷看答案。
+
+#### 3.1.3 本项目 Phase 5 实际用了哪些，没完整用哪些
+
+Phase 5 不是在原样复现 8xH100/600s 的 04-27 record。我们是在单 H100/1h 环境下尽量跑通这套 stack，因此有可用部分，也有 fallback 部分。
+
+已经实际用到并形成 R8 的部分：
+
+- CaseOps full data + byte sidecar。
+- records 04-27 脚本里的 advanced 模型/量化/TTT 主线。
+- GPTQ int6 + embed7/top3 类 artifact。
+- LQER/per-group 序列化逻辑。
+- real external `lrzip`。
+- legal phased TTT。
+- seed42。
+- `WARMDOWN_FRAC=0.95` 这个本地重新调出来的 warmdown。
+
+没有完整恢复、以 fallback 形式运行的部分：
+
+- 缺 FA3，所以 varlen attention/高吞吐 attention 没按原 record 环境跑。
+- 缺 `triton.tools.tensor_descriptor`，fused LeakyReLU² MLP 走 eager fallback。
+- varlen/doc-boundary compile 有问题，因此训练退到 `FixedSequenceTrainLoader`。
+- 04-27 record 是 8xH100/600s，约 4931 steps、约 121.7ms/step；本项目 R8 是 1xH100/1h，约 3202 steps、约 708k tok/s final，训练质量起点明显弱。
+
+所以，当报告里说“records stack 是主线”，准确意思是：
+
+```text
+不是继续在 root QS28 上加一个小组件，
+而是改用 04-27 高分提交那套数据 + 结构 + 训练 + 量化 + 压缩 + TTT 的系统组合，
+再针对本地 1xH100/1h 和 fallback 环境做修补与重调。
+```
+
+#### 3.1.4 为什么它能把结果从 1.16 拉到 1.08
+
+Phase 4 QS28 的 best 是 `1.16522320`，它只是在 root Q43 上局部加了 SparseGate + LeakyReLU² + Polar NS，再做导出细扫。这个路线仍然缺：
+
+- CaseOps byte sidecar/doc boundary；
+- records advanced 11L/MLP4/parallel lane/depth recurrence；
+- real `lrzip` 支撑的 embed7/top3 合规 artifact；
+- legal phased TTT。
+
+Phase 5 R1Q7/R8 补上这些系统部件后：
+
+- R1Q7 no-TTT 到 `1.09951341`，说明模型/量化/压缩主线已经远强于 root QS28。
+- R1Q7T 到 `1.08464351`，说明 legal phased TTT 带来约 `0.0149 BPB` 收益。
+- R8 通过 seed42 + `WARMDOWN_FRAC=0.95` 把 no-TTT 推到 `1.09647097`，post-TTT 到 `1.08179851`。
+
+这就是 `records stack` 的实质：它通过多层共同作用产生跃迁，而不是靠单个组件贡献全部收益。
+
 ## 4. 数据与 tokenizer 类优化
 
 ### 4.1 SP1024 与 SP8192 tokenizer
