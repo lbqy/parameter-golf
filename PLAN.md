@@ -4,6 +4,27 @@
 
 **脚本**：根目录 `train_gpt.py` + `gptq_export.py`（GPTQ 导出）。
 
+## 当前状态快照（2026-06-10）
+
+当前有效最佳已经从根目录 QS28/Phase 4 线转移到 records 04-27 stack 的 CaseOps + `lrzip` + legal phased TTT 主线。最新候选为 R8-pg291 上的 partial RoPE 低频置零变体：
+
+| 项目 | 值 |
+| --- | --- |
+| 当前最佳训练 run | `exp_rope_zlf2_r8_pg291_fa3_smear_seed42_nottt` |
+| TTT eval run | `exp_rope_zlf2_r8_pg291_fa3_smear_seed42_ttt_eval` |
+| artifact | `results/experiments/exp_rope_zlf2_r8_pg291_fa3_smear_seed42_nottt/final_model.int6.ptz` |
+| no-TTT / roundtrip BPB | **1.08972570** |
+| post-TTT BPB | **1.07586081** |
+| total bytes | **15,917,703** |
+| 关键开关 | `ROPE_DIMS=16 ROPE_ZERO_LOW_FREQS=2 REQUIRE_FA3=1 REQUIRE_TENSOR_DESCRIPTOR=1 CASEOPS_ENABLED=1 SMEAR_GATE_ENABLED=1 COMPRESSOR=pergroup` |
+
+当前判断：
+
+- 旧 R8 fallback 最佳为 `1.09647097 -> 1.08179851`；它证明 records 主线有效，但不是最终环境。
+- 修复 `pg291` 环境后，R8 严格复跑使用 FA3 `flash_attn_interface`、`triton.tools.tensor_descriptor`、DocumentPackingLoader 和 real `lrzip`，刷新到 `1.09043610 -> 1.07615418`。
+- partial RoPE 小扫中，`ROPE_ZERO_LOW_FREQS=2` 进一步刷新到 `1.08972570 -> 1.07586081`；`zlf1` 只小幅改善 no-TTT，`ROPE_DIMS=32 zlf1` 退化。
+- 下一步不再围绕旧 fallback artifact 做 TTT/export 微扫；应在 R8-pg291/zlf2 基础上做很小的训练动态矩阵，优先 seed、warmdown、batch/loop 时机和 RoPE 低频置零邻域。
+
 ---
 
 ## 第一阶段：Baseline 消融（已完成）
@@ -480,7 +501,33 @@ R17 `MIN_LR=0.2` 的 no-TTT 已明显负向，说明不能简单提高最低学�
 
 R12-R17 收口：warmdown 0.90/0.98 都没有超过 R8 的 0.95；warmdown095 在 seed0/1234 上也不如 seed42；early-loop+warmdown 与 `MIN_LR=0.2` 均负向。因此训练侧当前唯一仍未收口的是 R20 `WARMDOWN_FRAC=0.94` 和 R18/R19 的 min_lr 邻域。并行启动 R8 checkpoint 的 export-only 量化微扫（R8Q1-Q5：err0.95、calib32/64、err1.05、top4），目标是在 R8 no-TTT `1.09647097` 基础上不重训再降一点；若 export sweep 无法改善，则 Phase 5 最好候选保持 R8 `1.08179851`。
 
-R18/R19/R20 与 R8Q1-Q5 已全部回收且未刷新。最终 Phase 5 有效最好保持 R8：`exp_s5_r8_seed42_warmdown095_records0427_caseops_lrzip_1xh100`，no-TTT `1.09647097`，post-TTT `1.08179851`，总字节 `15,924,510`。Phase 5 的真实优化结论是：在单 H100/1h + 当前 fallback 环境下，records 04-27 栈可通过 seed42、真实 `lrzip`、warmdown095、默认 phased TTT 从 R1Q7T `1.08464` 推到 `1.08180`，已经略优于 2026-04-06 记录，但距离 2026-04-27 `~1.061` 仍主要差在训练吞吐/内核与 8 卡训练预算，而不是 TTT 微参、导出微参或 loop 延后。
+R18/R19/R20 与 R8Q1-Q5 已全部回收且未刷新。旧环境下 Phase 5 有效最好保持 R8：`exp_s5_r8_seed42_warmdown095_records0427_caseops_lrzip_1xh100`，no-TTT `1.09647097`，post-TTT `1.08179851`，总字节 `15,924,510`。这条线的结论是：在单 H100/1h + fallback 环境下，records 04-27 栈可通过 seed42、真实 `lrzip`、warmdown095、默认 phased TTT 从 R1Q7T `1.08464` 推到 `1.08180`，已经略优于 2026-04-06 记录，但距离 2026-04-27 `~1.061` 仍主要差在训练吞吐/内核与 8 卡训练预算，而不是 TTT 微参、导出微参或 loop 延后。
+
+2026-06-09/10 环境修复后，R8 不再接受静默 fallback。`pg291` 环境中 `torch 2.9.1+cu128`、FA3 `flash_attn_interface`、`triton.tools.tensor_descriptor` 和 real `lrzip` 均可用；训练命令加入 `REQUIRE_FA3=1 REQUIRE_TENSOR_DESCRIPTOR=1`，依赖缺失时直接失败。严格 R8-pg291 复跑日志确认 `train_loader:DocumentPackingLoader flash_attn_interface:True`，不再退到 fixed-sequence/SDPA/eager fallback；结果为 no-TTT `1.09043610`、post-TTT `1.07615418`、总字节 `15,917,614`，说明 FA3/doc-packing/fused MLP 是实质质量因素。
+
+随后在 R8-pg291 上做 partial RoPE 低频置零小扫。代码新增 `ROPE_ZERO_LOW_FREQS`，默认 `0` 保持旧行为；`ROPE_DIMS=16 ROPE_ZERO_LOW_FREQS=2` 会把 8 个 RoPE `inv_freq` 中最低频的两个尾部元素置零。
+
+| 变体 | steps | pre-EMA post-train BPB | no-TTT / roundtrip BPB | post-TTT BPB | bytes | 结论 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| R8-pg291 baseline | 3893 | 1.08176476 | 1.09043610 | 1.07615418 | 15,917,614 | 严格 R8 基线 |
+| `ROPE_DIMS=16 ROPE_ZERO_LOW_FREQS=1` | 3909 | 1.08151851 | 1.09014656 | | 15,917,111 | no-TTT 小幅好于 baseline |
+| `ROPE_DIMS=16 ROPE_ZERO_LOW_FREQS=2` | 3928 | **1.08117850** | **1.08972570** | **1.07586081** | 15,917,703 | 当前最佳 |
+| `ROPE_DIMS=32 ROPE_ZERO_LOW_FREQS=1` | 3906 | 1.08258273 | 1.09116293 | | 15,917,904 | 退化 |
+
+当前 Phase 5 的真实优化结论更新为：CaseOps 合规链路、records 04-27 结构栈、真实 `lrzip`、legal phased TTT、`pg291` kernel 环境和 partial RoPE zlf2 共同形成当前最佳 `1.07586081`。剩余 gap 仍主要在 no-TTT 起点：zlf2 no-TTT `1.08972570` 仍高于 04-27 records post-quant `1.073-1.075` 区间，因此主线应继续改善训练后 artifact，而不是继续做 TTT 或 export-only 微扫。
+
+### 2026-06-10 下一步队列
+
+以 `exp_rope_zlf2_r8_pg291_fa3_smear_seed42_nottt` / R8-pg291 配置作为新锚点，短期只做小矩阵：
+
+| 优先级 | 方向 | 建议实验 | 判断标准 |
+| --- | --- | --- | --- |
+| P0 | 固化复现 | 记录 `pg291`、CaseOps 路径、real `lrzip`、`REQUIRE_*` 硬闸、`ROPE_ZERO_LOW_FREQS=2`、TTT_EVAL_ONLY 命令 | 可稳定复现 `1.08972570 -> 1.07586081` |
+| P1 | RoPE 低频邻域 | `ROPE_ZERO_LOW_FREQS=3`、`ROPE_ZERO_LOW_FREQS=2 + ROPE_BASE` 小扰动，最多 2-3 组 | no-TTT 明显低于 `1.08972570` 才跑 TTT |
+| P1 | seed 复验 | 在 `pg291 + zlf2` 下补 seed0/1234 或最少 seed0 | 判断 zlf2 是否只吃 seed42 噪声 |
+| P2 | warmdown 复验 | 在 `pg291 + zlf2` 下扫 `WARMDOWN_FRAC=0.94/0.96`，避免重复旧 fallback 大矩阵 | no-TTT 改善 ≥ `0.0003` 才进入 TTT |
+| P2 | batch/loop 时机 | 小规模复验 `TRAIN_BATCH_TOKENS=917504` 或 loop start，因 doc-packing 后旧负结果未必完全迁移 | 只保留 step 数和 no-TTT 同时改善的分支 |
+| P3 | TTT/export 微扫 | 暂停 | 只有出现更强 no-TTT artifact 后再重启 |
 
 ### 阶段四收口
 
