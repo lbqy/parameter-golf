@@ -67,6 +67,11 @@ try:
 except ModuleNotFoundError:
     TensorDescriptor = None
 
+if bool(int(os.environ.get("REQUIRE_FA3", "0"))) and not FLASH_ATTN_INTERFACE_AVAILABLE:
+    raise RuntimeError("REQUIRE_FA3=1 but flash_attn_interface is unavailable")
+if bool(int(os.environ.get("REQUIRE_TENSOR_DESCRIPTOR", "0"))) and TensorDescriptor is None:
+    raise RuntimeError("REQUIRE_TENSOR_DESCRIPTOR=1 but triton.tools.tensor_descriptor is unavailable")
+
 
 # ===== Fused softcapped cross-entropy (Triton) — training-only path =====
 # Replaces the eager
@@ -309,6 +314,7 @@ class Hyperparameters:
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 3e1))
     rope_base = float(os.environ.get("ROPE_BASE", 1e4))
     rope_dims = int(os.environ.get("ROPE_DIMS", 16))
+    rope_zero_low_freqs = int(os.environ.get("ROPE_ZERO_LOW_FREQS", 0))
     rope_train_seq_len = int(os.environ.get("ROPE_TRAIN_SEQ_LEN", 2048))
     rope_yarn = bool(int(os.environ.get("ROPE_YARN", "0")))
     ln_scale = bool(int(os.environ.get("LN_SCALE", "1")))
@@ -968,16 +974,20 @@ FusedLeakyReLUSquareMLP = FusedLinearLeakyReLUSquareFunction.apply
 
 
 class Rotary(nn.Module):
-    def __init__(self, dim, base=1e4, train_seq_len=1024, rope_dims=0, yarn=True):
+    def __init__(self, dim, base=1e4, train_seq_len=1024, rope_dims=0, yarn=True, zero_low_freqs=0):
         super().__init__()
         self.dim = dim
         self.base = base
         self.train_seq_len = train_seq_len
         self.yarn = yarn
         self.rope_dims = rope_dims if rope_dims > 0 else dim
+        self.zero_low_freqs = max(0, zero_low_freqs)
         inv_freq = 1.0 / base ** (
             torch.arange(0, self.rope_dims, 2, dtype=torch.float32) / self.rope_dims
         )
+        if self.zero_low_freqs > 0:
+            inv_freq = inv_freq.clone()
+            inv_freq[-min(self.zero_low_freqs, inv_freq.numel()) :] = 0.0
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._seq_len_cached = 0
         self._cos_cached = None
@@ -997,6 +1007,9 @@ class Rotary(nn.Module):
                 inv_freq = 1.0 / new_base ** (
                     torch.arange(0, rd, 2, dtype=torch.float32, device=device) / rd
                 )
+                if self.zero_low_freqs > 0:
+                    inv_freq = inv_freq.clone()
+                    inv_freq[-min(self.zero_low_freqs, inv_freq.numel()) :] = 0.0
             else:
                 inv_freq = self.inv_freq.float().to(device)
             t = torch.arange(seq_len, device=device, dtype=torch.float32)
@@ -1021,7 +1034,7 @@ def apply_rotary_emb(x, cos, sin, rope_dims=0):
 
 class CausalSelfAttention(nn.Module):
     def __init__(
-        self, dim, num_heads, num_kv_heads, rope_base, qk_gain_init, train_seq_len, yarn=True,
+        self, dim, num_heads, num_kv_heads, rope_base, qk_gain_init, train_seq_len, yarn=True, rope_zero_low_freqs=0,
         attn_out_gate=False, attn_out_gate_src="proj", gate_window=12,
         gated_attn=False, gated_attn_init_std=0.01,
         sparse_attn_gate=False, sparse_attn_gate_init_std=0.0, sparse_attn_gate_scale=1.0,
@@ -1044,7 +1057,7 @@ class CausalSelfAttention(nn.Module):
             torch.full((num_heads,), qk_gain_init, dtype=torch.float32)
         )
         self.rope_dims = 0
-        self.rotary = Rotary(self.head_dim, base=rope_base, train_seq_len=train_seq_len, yarn=yarn)
+        self.rotary = Rotary(self.head_dim, base=rope_base, train_seq_len=train_seq_len, yarn=yarn, zero_low_freqs=rope_zero_low_freqs)
         self.use_xsa = False
         # AttnOutGate (PR #1667 MarioPaerle): per-head multiplicative gate on attention
         # output. CastedLinear so restore_fp32_params casts back to fp32 for GPTQ.
@@ -1184,12 +1197,14 @@ class Block(nn.Module):
         sparse_attn_gate=False,
         sparse_attn_gate_init_std=0.0,
         sparse_attn_gate_scale=1.0,
+        rope_zero_low_freqs=0,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(
             dim, num_heads, num_kv_heads, rope_base, qk_gain_init, train_seq_len, yarn=yarn,
+            rope_zero_low_freqs=rope_zero_low_freqs,
             attn_out_gate=attn_out_gate, attn_out_gate_src=attn_out_gate_src, gate_window=gate_window,
             gated_attn=gated_attn, gated_attn_init_std=gated_attn_init_std,
             sparse_attn_gate=sparse_attn_gate,
@@ -1260,6 +1275,7 @@ class GPT(nn.Module):
                     sparse_attn_gate=h.sparse_attn_gate_enabled,
                     sparse_attn_gate_init_std=h.sparse_attn_gate_init_std,
                     sparse_attn_gate_scale=h.sparse_attn_gate_scale,
+                    rope_zero_low_freqs=h.rope_zero_low_freqs,
                 )
                 for i in range(h.num_layers)
             ]
@@ -1274,6 +1290,7 @@ class GPT(nn.Module):
                     train_seq_len=h.train_seq_len,
                     rope_dims=h.rope_dims,
                     yarn=h.rope_yarn,
+                    zero_low_freqs=h.rope_zero_low_freqs,
                 )
         self.final_norm = RMSNorm()
         self.lm_head = (

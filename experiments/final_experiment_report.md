@@ -1,6 +1,6 @@
 # Parameter Golf 单卡 H100 1 小时约束下的实验报告
 
-日期：2026-06-08
+日期：2026-06-09
 
 ## 摘要
 
@@ -10,14 +10,15 @@
 
 | 项目 | 结果 |
 | --- | --- |
-| 当前最佳方案 | CaseOps + records 04-27 stack + seed42 + warmdown 0.95 + real `lrzip` + legal phased TTT |
-| no-TTT / roundtrip BPB | **1.09647097** |
-| post-TTT BPB | **1.08179851** |
-| artifact total bytes | **15,924,510** |
+| RUN_ID | `exp_rope_zlf2_r8_pg291_fa3_smear_seed42_nottt` + `exp_rope_zlf2_r8_pg291_fa3_smear_seed42_ttt_eval` |
+| 当前最佳方案 | CaseOps + records 04-27 stack + `pg291` FA3/TensorDescriptor 环境 + seed42 + warmdown 0.95 + partial RoPE low-frequency zeroing + real `lrzip` + legal phased TTT |
+| no-TTT / roundtrip BPB | **1.08972570** |
+| post-TTT BPB | **1.07586081** |
+| artifact total bytes | **15,917,703** |
 | 第四阶段最佳对照 | `1.16522320` |
-| 改善幅度 | `0.08342469 BPB` |
+| 改善幅度 | `0.08936239 BPB` |
 
-最终结果说明：在单卡 1 小时约束下，单纯在根目录训练脚本的局部最优附近继续微调已经进入平台期；真正的大幅提升来自把数据链路、模型结构、量化压缩和 legal TTT 作为一个系统整体优化。
+最终结果说明：在单卡 1 小时约束下，单纯在根目录训练脚本的局部最优附近继续微调已经进入平台期；真正的大幅提升来自把数据链路、模型结构、量化压缩、运行环境和 legal TTT 作为一个系统整体优化。
 
 ## 1. 实验背景与核心问题
 
@@ -145,7 +146,9 @@ Parameter Golf 的特殊之处在于，它把语言模型训练问题变成了�
 | --- | ---: | ---: | ---: | --- |
 | 初始合规 records 方案 | 1.09951341 | 1.08464351 | 15,925,658 | real `lrzip` 让 embed7/top3 合规 |
 | seed42 records 重训方案 | 1.09686294 | 1.08218120 | 15,925,323 | seed42 明显更好 |
-| warmdown 0.95 最终方案 | **1.09647097** | **1.08179851** | **15,924,510** | 当前最佳 |
+| warmdown 0.95 fallback 方案 | 1.09647097 | 1.08179851 | 15,924,510 | 旧环境最佳 |
+| warmdown 0.95 FA3/TensorDescriptor 复跑 | 1.09043610 | 1.07615418 | 15,917,614 | 严格 R8 基线 |
+| partial RoPE zlf2 | **1.08972570** | **1.07586081** | **15,917,703** | 当前最佳 |
 
 围绕最终方案的后续 sweep 表明：
 
@@ -155,7 +158,7 @@ Parameter Golf 的特殊之处在于，它把语言模型训练问题变成了�
 - delayed loop、batch917k、min_lr 抬高均未刷新。
 - 最终方案 checkpoint 的 export-only 微扫也未超过原始导出配置。
 
-因此 Phase 5 的最终判断是：当前主要提升来自 records 系统栈，而后续瓶颈主要是单卡 fallback 环境下的训练质量和吞吐，而不是 TTT 或导出微参。
+因此 Phase 5 的判断先是：主要提升来自 records 系统栈，而旧环境下的瓶颈主要是单卡 fallback 环境中的训练质量和吞吐，不是 TTT 或导出微参。随后补齐 FA3 和 TensorDescriptor 后，这个判断得到直接验证：严格 R8 复跑从 post-TTT `1.08179851` 进一步降到 `1.07615418`；partial RoPE zlf2 又小幅刷新到 `1.07586081`。
 
 ## 3. 大量扫参探索与淘汰路线
 
@@ -280,6 +283,28 @@ records 04-27 stack 不是一跑就成功。它先暴露出多个工程和合规
 
 这组探索说明，Phase 5 的“真实优化”首先是让高分 stack 合规、可运行、可评估。real `lrzip` 并不改变模型数学能力，但它让更高质量的 embed7/top3 artifact 装进 16MB，因此成为关键拐点。
 
+后续又专门补了环境修复复跑，以确认 fallback 不是被“偷偷接受”的长期方案。新建 `pg291` 环境后，`torch 2.9.1+cu128`、FA3 `flash_attn_interface`、`triton.tools.tensor_descriptor` 和 `lrzip` 均可用；训练命令加入 `REQUIRE_FA3=1 REQUIRE_TENSOR_DESCRIPTOR=1`，确保依赖缺失时直接失败。严格 R8 复跑日志确认 `train_loader:DocumentPackingLoader flash_attn_interface:True`，不再退到 fixed sequence loader。
+
+| 复跑项 | 旧 R8 fallback | 新 R8-pg291 |
+| --- | ---: | ---: |
+| 训练步数 | 3202 | 3893 |
+| pre-EMA post-train BPB | 1.08798009 | 1.08176476 |
+| no-TTT / roundtrip BPB | 1.09647097 | **1.09043610** |
+| post-TTT BPB | 1.08179851 | **1.07615418** |
+| bytes | 15,924,510 | **15,917,614** |
+
+这个复跑说明，FA3/doc-packing/fused MLP 不是单纯加速开关，而是通过增加 1 小时内的有效训练步数和恢复 records 数据组织方式，实质改善最终 artifact。
+
+在 R8-pg291 基础上又补了一组 partial RoPE 小扫。脚本新增 `ROPE_ZERO_LOW_FREQS` 开关，默认 `0` 完全保留旧行为；当 `ROPE_DIMS=16` 时，`ROPE_ZERO_LOW_FREQS=2` 会把 8 个 RoPE `inv_freq` 中最低频的两个尾部元素置为 `0`。
+
+| 变体 | steps | pre-EMA post-train BPB | no-TTT / roundtrip BPB | post-TTT BPB | bytes | 结论 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `ROPE_DIMS=16 ROPE_ZERO_LOW_FREQS=1` | 3909 | 1.08151851 | 1.09014656 | | 15,917,111 | 小幅好于 R8-pg291 no-TTT |
+| `ROPE_DIMS=16 ROPE_ZERO_LOW_FREQS=2` | 3928 | **1.08117850** | **1.08972570** | **1.07586081** | 15,917,703 | 当前最佳 |
+| `ROPE_DIMS=32 ROPE_ZERO_LOW_FREQS=1` | 3906 | 1.08258273 | 1.09116293 | | 15,917,904 | 变差 |
+
+`zlf2` 相对 R8-pg291 no-TTT 改善约 `0.00071 BPB`，TTT 后仍保留约 `0.00029 BPB` 的净收益。这个收益很小，但它是在 `REQUIRE_FA3=1 REQUIRE_TENSOR_DESCRIPTOR=1`、DocumentPackingLoader、SmearGate 和同一 CaseOps/quantization 配置下得到的真实刷新。
+
 ### 3.6 TTT 微扫：确认收益存在，也确认平台存在
 
 初始合规 records 方案跑通后，TTT 带来约 `0.0149 BPB` 的大收益。接下来很自然会问：能不能靠 TTT 参数继续下降？因此做了 prefix docs、phase 数、global lr 的邻域扫参。
@@ -320,7 +345,7 @@ records 04-27 stack 不是一跑就成功。它先暴露出多个工程和合规
 1. 证明 SP8192 + seq4096 是值得压缩的强基座，而不是盲目扩大模型。
 2. 证明根目录路线仍能小幅改善，但无法解释和 records 的巨大差距。
 3. 证明 CaseOps、TTT、records 结构必须配套，不能单独简化。
-4. 证明最终方案的关键不是导出微参或 TTT 微参，而是 records 训练质量、真实压缩器和 fallback 环境。
+4. 证明最终方案的关键不是导出微参或 TTT 微参，而是 records 训练质量、真实压缩器和运行环境。
 
 因此，最终路线并不是一开始就知道的答案，而是在大量负结果逐步排除之后留下来的路径。
 
@@ -366,12 +391,12 @@ GPTQ、LQER、mixed bit、bit packing、`lrzip` 决定了模型能否在 16MB �
 
 ## 5. 当前最佳结果分析
 
-warmdown 0.95 最终方案的结果可以拆成两部分理解：
+partial RoPE zlf2 最终方案的结果可以拆成两部分理解：
 
 ```text
-no-TTT:   1.09647097
-post-TTT: 1.08179851
-gain:     0.01467246 BPB
+no-TTT:   1.08972570
+post-TTT: 1.07586081
+gain:     0.01386489 BPB
 ```
 
 no-TTT 代表压缩 artifact 本身的质量；post-TTT 代表 legal TTT 后的最终质量。最终方案的 TTT 收益已经接近 records 中 TTT 的量级，因此当前差距主要不在 TTT 是否有效，而在 no-TTT 起点。
@@ -379,14 +404,14 @@ no-TTT 代表压缩 artifact 本身的质量；post-TTT 代表 legal TTT 后的�
 与 04-27 records mean `~1.06108` 相比，最终方案仍落后约：
 
 ```text
-1.08179851 - 1.06108 ~= 0.02072 BPB
+1.07586081 - 1.06108 ~= 0.01478 BPB
 ```
 
 造成这个 gap 的主要原因包括：
 
-1. 当前环境缺 FA3 和 fused MLP，records stack 只能以 fallback 形式运行。
-2. 训练退到 fixed sequence loader，不能完整发挥 varlen/doc-boundary 高吞吐形态。
-3. 04-27 record 是 8xH100/600s，约 4931 steps；最终方案是 1xH100/1h，约 3202 steps，训练起点更弱。
+1. no-TTT 起点仍高于 04-27 reference。partial RoPE zlf2 no-TTT 是 `1.08972570`，而 04-27 records post-quant 约在 `1.073-1.075` 区间。
+2. 环境 blocker 已修复第一层，但计算预算仍不同。04-27 record 是 8xH100/600s，约 4931 steps；R8-pg291 是 1xH100/1h，约 3893 steps。
+3. 新环境改变了吞吐和 batch/doc-packing 形态，旧 fallback 下的部分训练动态结论需要在新环境上重新验证。
 4. TTT 和导出微参已经接近平台，继续小扫预期收益很低。
 
 ## 6. 思考与体会
@@ -405,7 +430,7 @@ Phase 3/4/5 中有大量负结果，例如 coprime loader、partial RoPE、Leaky
 
 ### 6.4 工程环境也是算法的一部分
 
-Phase 5 中很多时间花在 FA3、SDPA fallback、TensorDescriptor、`lrzip`、byte sidecar 对齐等问题上。这让我意识到，高分方案往往不是论文式的单个公式，而是算法、kernel、压缩器和数据格式共同构成的系统。缺少某个环境组件时，同样的代码可能只能跑 fallback，最终训练质量也会下降。
+Phase 5 中很多时间花在 FA3、SDPA fallback、TensorDescriptor、`lrzip`、byte sidecar 对齐等问题上。这让我意识到，高分方案往往不是论文式的单个公式，而是算法、kernel、压缩器和数据格式共同构成的系统。缺少某个环境组件时，同样的代码可能只能跑 fallback，最终训练质量也会下降。环境修复复跑把这个判断从推测变成了实证：同一 R8 配置从 `1.08179851` 下降到 `1.07615418`；后续 partial RoPE zlf2 再下降到 `1.07586081`。
 
 ### 6.5 局部微调有边界，系统切换才带来跃迁
 
@@ -415,14 +440,13 @@ Phase 5 中很多时间花在 FA3、SDPA fallback、TensorDescriptor、`lrzip`�
 
 基于当前结果，我认为下一步优先级应当是：
 
-1. 固化 warmdown 0.95 最终方案的复现链路，确保 CaseOps sidecar、records fallback、real `lrzip`、默认 TTT 和 artifact bytes 可稳定复现。
-2. 解决 FA3、fused MLP、TensorDescriptor 等环境 blocker，使 records stack 恢复更接近 04-27 的高吞吐训练形态。
-3. 环境恢复后，优先重跑 seed42 + `WARMDOWN_FRAC=0.95`，再做少量 seed/warmdown 邻域验证。
+1. 固化 R8-pg291 最终方案的复现链路，确保 `pg291` 环境、CaseOps sidecar、`REQUIRE_FA3=1 REQUIRE_TENSOR_DESCRIPTOR=1`、real `lrzip`、默认 TTT 和 artifact bytes 可稳定复现。
+2. 在新环境上补最小矩阵：seed0/1234、warmdown 0.90/0.98/0.94，判断旧 fallback 下的 seed/warmdown 排序是否保持。
+3. 重新验证 batch 和 layer-loop 时机。新环境下 step 数、doc-packing 和吞吐形态已改变，旧的 batch917k/延后 loop 负结果值得小规模复验。
 4. 在得到更强 no-TTT artifact 之前，不再大量投入 TTT 微扫或 export-only 微扫。
-5. 如果 kernel 环境短期无法解决，可以尝试在根目录脚本中实现原生 doc-boundary 高吞吐路径，保留 CaseOps 和 legal TTT 语义，同时减少 fallback 损失。
 
 ## 8. 结论
 
-本项目从 baseline 出发，经历了从局部调参到系统复现的探索过程。前四阶段证明了 SP8192、大上下文、GPTQ/LQER、QK gain、tied embedding LR、recurrence、SparseGate/LeakyReLU²/Polar NS 等方法的局部价值，但也暴露了根目录局部优化路线的平台期。第五阶段补齐 CaseOps 合规链路并跑通 records 04-27 stack 后，最终将 best 从第四阶段的 `1.16522320` 推进到 warmdown 0.95 最终方案的 post-TTT `1.08179851`。
+本项目从 baseline 出发，经历了从局部调参到系统复现的探索过程。前四阶段证明了 SP8192、大上下文、GPTQ/LQER、QK gain、tied embedding LR、recurrence、SparseGate/LeakyReLU²/Polar NS 等方法的局部价值，但也暴露了根目录局部优化路线的平台期。第五阶段补齐 CaseOps 合规链路并跑通 records 04-27 stack 后，先将 best 从第四阶段的 `1.16522320` 推进到 fallback R8 的 post-TTT `1.08179851`；环境修复后严格 R8 进一步刷新到 `1.07615418`；partial RoPE zlf2 最终刷新到 `1.07586081`。
 
-这一结果说明，在 16MB 小模型挑战中，真正有效的优化不是单点技巧，而是数据表示、模型结构、训练动态、量化压缩和测试时自适应的联合设计。当前剩余差距主要来自单卡 fallback 训练质量和高吞吐 kernel 环境，而不是某个简单超参尚未扫到。
+这一结果说明，在 16MB 小模型挑战中，真正有效的优化不是单点技巧，而是数据表示、模型结构、训练动态、量化压缩、运行环境和测试时自适应的联合设计。当前剩余差距主要来自单卡训练预算、新环境下训练动态尚未重扫，以及与 04-27 reference 的并行形态差异，而不是某个简单超参尚未扫到。
